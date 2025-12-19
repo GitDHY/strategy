@@ -693,6 +693,254 @@ def render_single_stock_analysis():
             except Exception as e:
                 st.error(f"An error occurred: {e}")
 
+# --- Page 3: State Machine Check ---
+
+def render_state_machine_check():
+    st.header("🛡️ 市场状态机诊断 (Market State Machine)")
+    st.caption("基于多因子模型 (价格趋势、波动率、动量、宏观) 的 IWY 定投状态评估系统。")
+
+    with st.expander("📖 查看状态判定规则 (Criteria)", expanded=False):
+        st.markdown("""
+        | State | Condition (Priority High to Low) | Action |
+        | :--- | :--- | :--- |
+        | **🔴 State 2: 恐慌加仓** | **满足任意 2 项:**<br>1. VIX ≥ 30<br>2. 回撤 (Drawdown) ≤ -20%<br>3. 价格 < 0.9 * MA200 | 加大定投 IWY (45%)，WTMF (25%) |
+        | **⚫ State 5: 趋势破坏** | **满足任意 2 项:**<br>1. 价格 < 月线 MA10<br>2. 12个月动量 < 0<br>3. 宏观衰退 (Macro Recession) | 停止风险定投，只保留防御 |
+        | **🟠 State 4: 高位风险** | **满足任意 2 项:**<br>1. 价格 > 1.2 * MA200<br>2. VIX < 15<br>3. 动量衰竭 (Mom Declining) | 停止 IWY 定投，只进防御 |
+        | **🟡 State 3: 趋势恢复** | **同时满足:**<br>1. 价格 > MA200<br>2. 12个月动量 > 0<br>3. VIX < 25 | 恢复正常定投 |
+        | **🟢 State 1: 正常定投** | (Default) 未触发上述任何状态 | 保持基础权重 |
+        """)
+
+    if st.button("🚀 开始诊断 (Run Diagnosis)", type="primary", use_container_width=True):
+        status_text = st.empty()
+        status_text.info("🔄 正在初始化... (Initializing...)")
+        
+        try:
+            # 1. Settings
+            end_date = pd.to_datetime("today")
+            start_date = end_date - pd.DateOffset(months=36) # Fetch more for charts
+
+            # 2. Fetch Data
+            status_text.info("📥 正在获取数据 (Fetching IWY, VIX, Macro)...")
+            
+            # IWY
+            df_iwy = yf.download("IWY", start=start_date, end=end_date, progress=False, auto_adjust=False)
+            if isinstance(df_iwy.columns, pd.MultiIndex): df_iwy.columns = df_iwy.columns.get_level_values(0)
+            
+            # VIX
+            df_vix = get_vix_data(start_date, end_date)
+            
+            # Macro (INDPRO)
+            df_macro = get_fred_indpro()
+
+            if df_iwy.empty:
+                status_text.error("❌ 无法获取 IWY 数据，请检查网络。")
+                return
+
+            status_text.info("⚙️ 正在计算指标 (Calculating Indicators)...")
+
+            # 3. Process Data
+            # Resample to Monthly for specific Monthly checks (MA10 Month)
+            df_monthly = df_iwy.resample('M').agg({'Close': 'last'})
+            df_monthly['MA10'] = df_monthly['Close'].rolling(window=10).mean()
+            
+            # Daily Indicators
+            df = df_iwy[['Close']].copy()
+            df['MA200'] = df['Close'].rolling(window=200).mean()
+            df['High_1Y'] = df['Close'].rolling(window=252).max()
+            df['Drawdown_1Y'] = (df['Close'] / df['High_1Y'] - 1) * 100
+            
+            # Momentum 12M (approx 252 trading days)
+            df['Mom_12M'] = df['Close'].pct_change(252)
+            
+            # Merge VIX
+            df = df.join(df_vix['VIX'], how='left').fillna(method='ffill')
+            
+            # Get Latest Values
+            curr = df.iloc[-1]
+            curr_date = df.index[-1]
+            
+            price = curr['Close']
+            ma200 = curr['MA200']
+            vix = curr['VIX']
+            dd_1y = curr['Drawdown_1Y']
+            mom_12m = curr['Mom_12M']
+            
+            # Get Monthly Data
+            if not df_monthly.empty:
+                month_ma10 = df_monthly.iloc[-1]['MA10']
+            else:
+                month_ma10 = np.nan
+            
+            # Check Macro
+            macro_signal = "Neutral"
+            macro_val = np.nan
+            if not df_macro.empty:
+                last_macro = df_macro.iloc[-1]
+                macro_val = last_macro.get('INDPRO_YoY', 0)
+                if macro_val < 0:
+                    macro_signal = "Recession"
+                else:
+                    macro_signal = "Expansion"
+
+            # Declining Momentum Check
+            prev_mom_12m = df.iloc[-20]['Mom_12M'] if len(df) > 20 else mom_12m
+            mom_declining = (mom_12m < prev_mom_12m)
+
+            # --- 4. Evaluate States ---
+            
+            detected_state = "State 1"
+            detected_name = "正常定投 (Neutral)"
+            detected_color = "green"
+            detected_action = "保持基础权重（基准态）"
+            reasons = []
+
+            # Criteria Checks
+            s2_triggers = []
+            if vix >= 30: s2_triggers.append(f"VIX High ({vix:.1f} ≥ 30)")
+            if dd_1y <= -20: s2_triggers.append(f"Deep Drawdown ({dd_1y:.1f}% ≤ -20%)")
+            if price < (ma200 * 0.9): s2_triggers.append(f"Price < 0.9*MA200 ({price:.2f} < {ma200*0.9:.2f})")
+            
+            s5_triggers = []
+            if not np.isnan(month_ma10) and price < month_ma10: s5_triggers.append(f"Price < Month MA10 ({price:.2f} < {month_ma10:.2f})")
+            if mom_12m < 0: s5_triggers.append(f"Neg Momentum ({mom_12m*100:.1f}% < 0)")
+            if macro_signal == "Recession": s5_triggers.append(f"Macro Recession (INDPRO {macro_val:.2f}% < 0)")
+
+            s4_triggers = []
+            if price > (ma200 * 1.2): s4_triggers.append(f"Price > 1.2*MA200 ({price:.2f} > {ma200*1.2:.2f})")
+            if vix < 15: s4_triggers.append(f"VIX Low ({vix:.1f} < 15)")
+            if mom_12m > 0 and mom_declining: s4_triggers.append("Momentum Declining (Div)")
+
+            is_s3 = (price > ma200) and (mom_12m > 0) and (vix < 25)
+
+            status_style = "info" # default
+            
+            if len(s2_triggers) >= 2:
+                detected_state = "State 2"
+                detected_name = "🔴 恐慌加仓 (Accumulation)"
+                detected_action = "加大定投 IWY (45%)，WTMF (25%)"
+                reasons = s2_triggers
+                status_style = "error" # Red
+            
+            elif len(s5_triggers) >= 2:
+                detected_state = "State 5"
+                detected_name = "⚫ 趋势破坏 / 防御 (Defense)"
+                detected_action = "停止所有风险资产定投，只保留防御 (WTMF/Cash)"
+                reasons = s5_triggers
+                status_style = "secondary" # Grey/Black ish
+                
+            elif len(s4_triggers) >= 2:
+                detected_state = "State 4"
+                detected_name = "🟠 高位风险 (Distribution)"
+                detected_action = "停止 IWY 定投，新资金只进防御层"
+                reasons = s4_triggers
+                status_style = "warning" # Orange
+                
+            elif is_s3:
+                detected_state = "State 3"
+                detected_name = "🟡 趋势恢复 (Recovery)"
+                detected_action = "恢复正常定投，不追高、不减仓"
+                reasons = ["Price > MA200", "Mom > 0", "VIX < 25"]
+                status_style = "warning" # Yellow-ish (Gold not avail, use warning)
+            
+            else:
+                detected_state = "State 1"
+                detected_name = "🟢 正常定投 (Neutral)"
+                detected_action = "保持基础权重（基准态）"
+                reasons = ["Normal Conditions"]
+                status_style = "success" # Green
+
+            status_text.empty() # Clear loading text
+
+            # --- 5. UI Rendering ---
+            
+            # A. Main Status Card
+            with st.container():
+                st.markdown(f"### 🏁 Diagnosis Result: {detected_name}")
+                if status_style == "error":
+                    st.error(f"**Action Plan**: {detected_action}")
+                elif status_style == "warning":
+                    st.warning(f"**Action Plan**: {detected_action}")
+                elif status_style == "success":
+                    st.success(f"**Action Plan**: {detected_action}")
+                else:
+                    st.info(f"**Action Plan**: {detected_action}")
+
+                if reasons:
+                    st.caption(f"**Triggered Criteria**: {', '.join(reasons)}")
+
+            st.divider()
+
+            # B. Metrics Row
+            st.markdown("#### 📊 Key Indicators (关键指标)")
+            m1, m2, m3, m4 = st.columns(4)
+            
+            m1.metric("Price vs MA200", f"${price:.2f}", delta=f"{(price/ma200-1)*100:.1f}%", help="Distance from 200-day Moving Average")
+            m2.metric("12M Momentum", f"{mom_12m*100:.1f}%", delta="Declining" if mom_declining else "Rising", delta_color="inverse" if mom_declining else "normal", help="1-Year Price Change")
+            m3.metric("VIX Index", f"{vix:.2f}", delta=f"{vix-15:.1f} (Ref 15)", delta_color="inverse", help="Volatility Index")
+            m4.metric("Macro (INDPRO)", f"{macro_val:.2f}%" if not np.isnan(macro_val) else "N/A", macro_signal, delta_color="normal" if macro_val>0 else "inverse", help="Industrial Production YoY")
+
+            # C. Visual Context (Charts)
+            st.markdown("#### 📉 Visual Context (趋势与环境)")
+            
+            # Prepare Chart Data (Last 12 Months)
+            chart_start = end_date - pd.DateOffset(months=18)
+            mask = df.index >= chart_start
+            chart_df = df.loc[mask]
+            
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
+                                vertical_spacing=0.05, 
+                                row_heights=[0.5, 0.25, 0.25],
+                                subplot_titles=("Price & MA200", "VIX (Volatility)", "Momentum (12M)"))
+
+            # Row 1: Price & MA200
+            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['Close'], name='IWY Price', line=dict(color='black', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA200'], name='MA200', line=dict(color='orange', width=1)), row=1, col=1)
+            
+            # Row 2: VIX
+            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['VIX'], name='VIX', line=dict(color='purple', width=1)), row=2, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="red", row=2, col=1, annotation_text="Panic (30)")
+            fig.add_hline(y=15, line_dash="dash", line_color="green", row=2, col=1, annotation_text="Complacency (15)")
+
+            # Row 3: Momentum
+            fig.add_trace(go.Bar(x=chart_df.index, y=chart_df['Mom_12M']*100, name='Mom 12M %', marker_color=np.where(chart_df['Mom_12M']<0, 'red', 'green')), row=3, col=1)
+            fig.add_hline(y=0, line_color="black", row=3, col=1)
+
+            fig.update_layout(height=700, template="plotly_white", hovermode="x unified", showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # D. Detailed Data Table
+            with st.expander("🔎 查看详细数据 (Detailed Data)", expanded=False):
+                st.write(f"**Analysis Date**: {curr_date.date()}")
+                
+                # Create a clean dataframe for display
+                detail_data = {
+                    "Metric": ["Price", "MA200", "Month MA10", "1Y High", "1Y Drawdown", "VIX", "12M Momentum", "Macro (INDPRO)"],
+                    "Value": [
+                        f"${price:.2f}", 
+                        f"${ma200:.2f}", 
+                        f"${month_ma10:.2f}" if not np.isnan(month_ma10) else "N/A",
+                        f"${curr['High_1Y']:.2f}",
+                        f"{dd_1y:.1f}%",
+                        f"{vix:.2f}",
+                        f"{mom_12m*100:.1f}%",
+                        f"{macro_val:.2f}%" if not np.isnan(macro_val) else "N/A"
+                    ],
+                    "Reference / Trigger": [
+                        "-", 
+                        "Trend Baseline", 
+                        "State 5 Trigger (Price < MA10)",
+                        "-",
+                        "State 2 Trigger (≤ -20%)",
+                        "State 2 (≥30) / State 4 (<15)",
+                        "State 5 (<0) / State 3 (>0)",
+                        "State 5 (<0)"
+                    ]
+                }
+                st.table(pd.DataFrame(detail_data))
+
+        except Exception as e:
+            status_text.error(f"Analysis Failed: {str(e)}")
+
 # --- Page 2: Portfolio Backtest ---
 
 def render_portfolio_backtest():
@@ -1206,9 +1454,11 @@ def render_portfolio_backtest():
 # --- Main App Navigation ---
 
 st.sidebar.title("App Navigation")
-page = st.sidebar.radio("选择功能", ["单只股票策略分析", "投资组合回测"])
+page = st.sidebar.radio("选择功能", ["单只股票策略分析", "投资组合回测", "状态机检查"])
 
 if page == "单只股票策略分析":
     render_single_stock_analysis()
-else:
+elif page == "投资组合回测":
     render_portfolio_backtest()
+else:
+    render_state_machine_check()
