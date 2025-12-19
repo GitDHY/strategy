@@ -1,0 +1,144 @@
+{
+    "Current": {
+        "tickers": [
+            "IWY",
+            "LVHI",
+            "CTA",
+            "FXI",
+            "G3B.SI",
+            "SRT.SI",
+            "AJBU.SI",
+            "GSD.SI"
+        ],
+        "weights": {
+            "IWY": 10.0,
+            "LVHI": 13.0,
+            "CTA": 8.0,
+            "FXI": 10.0,
+            "G3B.SI": 5.0,
+            "SRT.SI": 5.0,
+            "AJBU.SI": 5.0,
+            "GSD.SI": 9.0
+        }
+    },
+    "SPY": {
+        "tickers": [
+            "SPY"
+        ],
+        "weights": {
+            "SPY": 100.0
+        }
+    },
+    "test1": {
+        "tickers": [
+            "G3B.SI",
+            "IWY",
+            "LVHI",
+            "CTA",
+            "FXI",
+            "SRT.SI",
+            "AJBU.SI",
+            "GSD.SI"
+        ],
+        "weights": {
+            "G3B.SI": 10.0,
+            "IWY": 30.0,
+            "LVHI": 12.0,
+            "CTA": 18.0,
+            "FXI": 5.0,
+            "SRT.SI": 8.0,
+            "AJBU.SI": 7.0,
+            "GSD.SI": 10.0
+        }
+    },
+    "op2": {
+        "tickers": [
+            "G3B.SI",
+            "IWY",
+            "LVHI",
+            "WTMF",
+            "SRT.SI",
+            "AJBU.SI",
+            "GSD.SI"
+        ],
+        "weights": {
+            "G3B.SI": 10.0,
+            "IWY": 40.0,
+            "LVHI": 15.0,
+            "WTMF": 15.0,
+            "SRT.SI": 5.0,
+            "AJBU.SI": 5.0,
+            "GSD.SI": 10.0
+        }
+    },
+    "QQQ": {
+        "tickers": [
+            "QQQ"
+        ],
+        "weights": {
+            "QQQ": 100.0
+        }
+    },
+    "op3": {
+        "tickers": [
+            "G3B.SI",
+            "IWY",
+            "LVHI",
+            "WTMF",
+            "SRT.SI",
+            "AJBU.SI",
+            "GSD.SI"
+        ],
+        "weights": {
+            "G3B.SI": 10.0,
+            "IWY": 40.0,
+            "LVHI": 15.0,
+            "WTMF": 15.0,
+            "SRT.SI": 3.0,
+            "AJBU.SI": 2.0,
+            "GSD.SI": 15.0
+        }
+    },
+    "op4": {
+        "tickers": [
+            "G3B.SI",
+            "IWY",
+            "LVHI",
+            "WTMF",
+            "SRT.SI",
+            "AJBU.SI",
+            "GSD.SI"
+        ],
+        "weights": {
+            "G3B.SI": 10.0,
+            "IWY": 50.0,
+            "LVHI": 10.0,
+            "WTMF": 10.0,
+            "SRT.SI": 3.0,
+            "AJBU.SI": 2.0,
+            "GSD.SI": 15.0
+        }
+    },
+    "op5": {
+        "tickers": [
+            "G3B.SI",
+            "GLD",
+            "WTMF",
+            "IWY"
+        ],
+        "weights": {
+            "G3B.SI": 20.0,
+            "GLD": 10.0,
+            "WTMF": 10.0,
+            "IWY": 60.0
+        }
+    },
+    "IWY": {
+        "tickers": [
+            "IWY"
+        ],
+        "weights": {
+            "IWY": 100.0
+        }
+    }
+}
