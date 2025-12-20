@@ -6,25 +6,80 @@ from plotly.subplots import make_subplots
 import numpy as np
 import json
 import os
+import requests
+import io
+
+import datetime
 
 # Set page config must be the first streamlit command
 st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer")
 
 # --- Helper Functions for Indicators ---
 
+# Removed cache for debugging connection issues
+def fetch_fred_data(series_id):
+    """
+    Robust fetch for FRED data using requests with User-Agent.
+    Priority:
+    1. Local file (fred_{series_id}.csv)
+    2. Network fetch (fred.stlouisfed.org)
+    """
+    # 1. Check local file override
+    local_file = os.path.join(os.path.dirname(__file__), f"fred_{series_id}.csv")
+    if os.path.exists(local_file):
+        try:
+            df = pd.read_csv(local_file, parse_dates=['observation_date'], index_col='observation_date')
+            df.columns = [series_id]
+            # st.toast(f"Using local file for {series_id}", icon="📂") # Optional toast
+            return df
+        except Exception as e:
+            st.warning(f"Found local file {local_file} but failed to read: {e}")
+
+    # 2. Network Fetch
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    import time
+    
+    # Retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Added verify=False to bypass SSL errors (common in some networks)
+            # Suppress warnings for verify=False
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # Increased timeout to 30s
+            response = requests.get(url, headers=headers, timeout=30, verify=False)
+            response.raise_for_status()
+            content = response.content.decode('utf-8')
+            df = pd.read_csv(io.StringIO(content), parse_dates=['observation_date'], index_col='observation_date')
+            df.columns = [series_id]
+            return df
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(1) # Wait 1s before retry
+                continue
+            
+            # Show friendly warning instead of error
+            st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id})。网络连接被切断。\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件即可恢复正常。")
+            print(f"Error fetching FRED data ({series_id}): {e}")
+            # Return empty DataFrame on failure
+            return pd.DataFrame()
+
 @st.cache_data
 def get_fred_indpro():
     """
     Fetches Industrial Production Index (INDPRO) from FRED as a proxy for Economic Cycle.
     """
-    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=INDPRO"
-    try:
-        df = pd.read_csv(url, parse_dates=['observation_date'], index_col='observation_date')
-        df.columns = ['INDPRO']
+    df = fetch_fred_data("INDPRO")
+    if not df.empty:
         # Calculate YoY Growth
         df['INDPRO_YoY'] = df['INDPRO'].pct_change(12) * 100
         return df
-    except Exception as e:
+    else:
         return pd.DataFrame()
 
 def calculate_rsi(series, period=14):
@@ -122,6 +177,195 @@ def delete_portfolio(name):
         del data[name]
         with open(PORTFOLIO_FILE, "w") as f:
             json.dump(data, f, indent=4)
+
+# --- Shared Logic for Backtest & State Machine ---
+
+def get_target_percentages(s, gold_bear=False, value_regime=False):
+    """
+    Returns target asset allocation based on macro state.
+    Shared by State Machine Diagnosis and Backtest.
+    """
+    targets = {}
+    
+    if s == "INFLATION_SHOCK":
+        # Rate Spike: Kill Duration, Cash is King
+        targets = {
+            'IWY': 0.00, 'WTMF': 0.40, 'LVHI': 0.10,
+            'G3B.SI': 0.10, 'MBH.SI': 0.00, 'GSD.SI': 0.25,
+            'SRT.SI': 0.00, 'AJBU.SI': 0.00
+        }
+    elif s == "DEFLATION_RECESSION":
+        # Recession: Long Bonds, Gold
+        targets = {
+            'IWY': 0.10, 'WTMF': 0.15, 'LVHI': 0.05,
+            'G3B.SI': 0.05, 'MBH.SI': 0.35, 'GSD.SI': 0.25,
+            'SRT.SI': 0.00, 'AJBU.SI': 0.00
+        }
+    elif s == "EXTREME_ACCUMULATION":
+        # Buy Dip
+        targets = {
+            'IWY': 0.70, 'WTMF': 0.00, 'LVHI': 0.00,
+            'G3B.SI': 0.10, 'MBH.SI': 0.05, 'GSD.SI': 0.05,
+            'SRT.SI': 0.06, 'AJBU.SI': 0.04
+        }
+    elif s == "CAUTIOUS_TREND":
+        # Bear Trend: Defensive
+        growth_w = 0.15
+        value_w = 0.25
+        if value_regime:
+            growth_w = 0.10
+            value_w = 0.30
+        
+        targets = {
+            'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
+            'G3B.SI': 0.20, 'MBH.SI': 0.15, 'GSD.SI': 0.10,
+            'SRT.SI': 0.03, 'AJBU.SI': 0.02
+        }
+    elif s == "CAUTIOUS_VOL":
+        # High Vol: Hedge
+        targets = {
+            'IWY': 0.40, 'WTMF': 0.20, 'LVHI': 0.10,
+            'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
+            'SRT.SI': 0.03, 'AJBU.SI': 0.02
+        }
+    else: # NEUTRAL
+        # Style Rotation
+        growth_w = 0.50
+        value_w = 0.10
+        if value_regime:
+            growth_w = 0.40
+            value_w = 0.20
+            
+        targets = {
+            'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
+            'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
+            'SRT.SI': 0.03, 'AJBU.SI': 0.02
+        }
+        
+    # Gold Trend Filter: If Gold is Bearish, cut allocation by half, move to WTMF (Cash proxy)
+    if gold_bear and targets.get('GSD.SI', 0) > 0:
+        cut_amount = targets['GSD.SI'] * 0.5
+        targets['GSD.SI'] -= cut_amount
+        targets['WTMF'] += cut_amount
+    
+    return targets
+
+def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0):
+    """
+    Simulates the strategy over historical states.
+    df_states: DataFrame with 'State', 'Gold_Bear', 'Value_Regime' columns, indexed by Date.
+    """
+    # 1. Define Asset Universe
+    assets = ['IWY', 'WTMF', 'LVHI', 'G3B.SI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI', 'TLT', 'SPY']
+    
+    # 2. Fetch Price Data
+    fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=7)
+    
+    try:
+        price_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)['Adj Close']
+    except:
+        # Fallback if Adj Close issue
+        try:
+             price_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)['Close']
+        except Exception as e:
+            return None, f"Data fetch failed: {e}"
+
+    if price_data.empty:
+         return None, "No price data fetched."
+
+    # Fill missing
+    price_data = price_data.fillna(method='ffill').fillna(method='bfill')
+    
+    # Filter to requested range
+    price_data = price_data[(price_data.index >= pd.to_datetime(start_date)) & (price_data.index <= pd.to_datetime(end_date))]
+    if price_data.empty:
+         return None, "Price data empty after filtering."
+
+    # Align states with prices
+    common_idx = price_data.index.intersection(df_states.index)
+    price_data = price_data.loc[common_idx]
+    df_states = df_states.loc[common_idx]
+    
+    if len(price_data) < 10:
+        return None, "Insufficient data points for backtest."
+
+    # 3. Strategy Simulation (Daily Rebalancing Approximation)
+    portfolio_values = []
+    current_val = initial_capital
+    
+    # We iterate daily. To speed up, we could vectorise, but logic is complex.
+    # Logic: Daily return = Sum(Weight_i * Return_i)
+    # This assumes we rebalance to target weights DAILY.
+    
+    returns_df = price_data.pct_change().fillna(0)
+    
+    for date, row in df_states.iterrows():
+        # Get Targets for today (based on today's state)
+        # Note: In reality, we trade tomorrow based on today's close state?
+        # Or trade today at close? Assuming trade at close.
+        s = row['State']
+        gb = row['Gold_Bear']
+        vr = row['Value_Regime']
+        
+        targets = get_target_percentages(s, gold_bear=gb, value_regime=vr)
+        
+        # Calculate Portfolio Return for this day
+        # If we rebalanced yesterday to these weights?
+        # Simpler: Assume we hold these weights TODAY.
+        # So return is sum(w * r).
+        
+        daily_ret = 0.0
+        if date in returns_df.index:
+            rets = returns_df.loc[date]
+            for t, w in targets.items():
+                if t in rets:
+                    daily_ret += w * rets[t]
+        
+        current_val = current_val * (1 + daily_ret)
+        portfolio_values.append(current_val)
+        
+    s_strategy = pd.Series(portfolio_values, index=df_states.index, name="Strategy")
+    
+    # 4. Benchmarks
+    # IWY
+    s_iwy = pd.Series(dtype=float)
+    if 'IWY' in price_data.columns:
+        iwy_prices = price_data['IWY']
+        s_iwy = (iwy_prices / iwy_prices.iloc[0]) * initial_capital
+        s_iwy.name = "IWY (Growth)"
+
+    # 60/40
+    s_6040 = pd.Series(dtype=float)
+    if 'SPY' in price_data.columns and 'TLT' in price_data.columns:
+        spy = price_data['SPY'] / price_data['SPY'].iloc[0]
+        tlt = price_data['TLT'] / price_data['TLT'].iloc[0]
+        s_6040 = (0.6 * spy + 0.4 * tlt) * initial_capital
+        s_6040.name = "60/40 (SPY/TLT)"
+        
+    # Neutral Config (Buy & Hold / Fixed Weight)
+    default_targets = get_target_percentages("NEUTRAL", False, False)
+    neutral_vals = []
+    curr_n = initial_capital
+    
+    for date in df_states.index:
+        daily_ret = 0.0
+        if date in returns_df.index:
+            rets = returns_df.loc[date]
+            for t, w in default_targets.items():
+                if t in rets:
+                    daily_ret += w * rets[t]
+        curr_n = curr_n * (1 + daily_ret)
+        neutral_vals.append(curr_n)
+        
+    s_neutral = pd.Series(neutral_vals, index=df_states.index, name="Neutral Config")
+    
+    return pd.DataFrame({
+        "Dynamic Strategy": s_strategy,
+        "IWY (Benchmark)": s_iwy,
+        "60/40 (Balanced)": s_6040,
+        "Neutral (Fixed)": s_neutral
+    }), None
+
 
 # --- Page 1: Single Stock Analysis ---
 
@@ -695,251 +939,1021 @@ def render_single_stock_analysis():
 
 # --- Page 3: State Machine Check ---
 
-def render_state_machine_check():
-    st.header("🛡️ 市场状态机诊断 (Market State Machine)")
-    st.caption("基于多因子模型 (价格趋势、波动率、动量、宏观) 的 IWY 定投状态评估系统。")
+@st.cache_data
+def get_historical_macro_data(start_date, end_date):
+    """
+    Fetches and calculates macro states for a given date range.
+    Includes buffer to ensure valid data at start_date.
+    """
+    # Add buffer for rolling windows (MA200 needs 200 days, Correlation 60 days, etc.)
+    # We add 365 days to be safe.
+    buffer_days = 365
+    fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=buffer_days)
+    fetch_end = pd.to_datetime(end_date)
 
-    with st.expander("📖 查看状态判定规则 (Criteria)", expanded=False):
-        st.markdown("""
-        | State | Condition (Priority High to Low) | Action |
-        | :--- | :--- | :--- |
-        | **🔴 State 2: 恐慌加仓** | **满足任意 2 项:**<br>1. VIX ≥ 30<br>2. 回撤 (Drawdown) ≤ -20%<br>3. 价格 < 0.9 * MA200 | 加大定投 IWY (45%)，WTMF (25%) |
-        | **⚫ State 5: 趋势破坏** | **满足任意 2 项:**<br>1. 价格 < 月线 MA10<br>2. 12个月动量 < 0<br>3. 宏观衰退 (Macro Recession) | 停止风险定投，只保留防御 |
-        | **🟠 State 4: 高位风险** | **满足任意 2 项:**<br>1. 价格 > 1.2 * MA200<br>2. VIX < 15<br>3. 动量衰竭 (Mom Declining) | 停止 IWY 定投，只进防御 |
-        | **🟡 State 3: 趋势恢复** | **同时满足:**<br>1. 价格 > MA200<br>2. 12个月动量 > 0<br>3. VIX < 25 | 恢复正常定投 |
-        | **🟢 State 1: 正常定投** | (Default) 未触发上述任何状态 | 保持基础权重 |
-        """)
-
-    if st.button("🚀 开始诊断 (Run Diagnosis)", type="primary", use_container_width=True):
-        status_text = st.empty()
-        status_text.info("🔄 正在初始化... (Initializing...)")
+    # 1. Fetch Market Data
+    tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD']
+    try:
+        df_all = yf.download(tickers, start=fetch_start, end=fetch_end, progress=False, auto_adjust=False)
         
-        try:
-            # 1. Settings
-            end_date = pd.to_datetime("today")
-            start_date = end_date - pd.DateOffset(months=36) # Fetch more for charts
-
-            # 2. Fetch Data
-            status_text.info("📥 正在获取数据 (Fetching IWY, VIX, Macro)...")
-            
-            # IWY
-            df_iwy = yf.download("IWY", start=start_date, end=end_date, progress=False, auto_adjust=False)
-            if isinstance(df_iwy.columns, pd.MultiIndex): df_iwy.columns = df_iwy.columns.get_level_values(0)
-            
-            # VIX
-            df_vix = get_vix_data(start_date, end_date)
-            
-            # Macro (INDPRO)
-            df_macro = get_fred_indpro()
-
-            if df_iwy.empty:
-                status_text.error("❌ 无法获取 IWY 数据，请检查网络。")
-                return
-
-            status_text.info("⚙️ 正在计算指标 (Calculating Indicators)...")
-
-            # 3. Process Data
-            # Resample to Monthly for specific Monthly checks (MA10 Month)
-            df_monthly = df_iwy.resample('M').agg({'Close': 'last'})
-            df_monthly['MA10'] = df_monthly['Close'].rolling(window=10).mean()
-            
-            # Daily Indicators
-            df = df_iwy[['Close']].copy()
-            df['MA200'] = df['Close'].rolling(window=200).mean()
-            df['High_1Y'] = df['Close'].rolling(window=252).max()
-            df['Drawdown_1Y'] = (df['Close'] / df['High_1Y'] - 1) * 100
-            
-            # Momentum 12M (approx 252 trading days)
-            df['Mom_12M'] = df['Close'].pct_change(252)
-            
-            # Merge VIX
-            df = df.join(df_vix['VIX'], how='left').fillna(method='ffill')
-            
-            # Get Latest Values
-            curr = df.iloc[-1]
-            curr_date = df.index[-1]
-            
-            price = curr['Close']
-            ma200 = curr['MA200']
-            vix = curr['VIX']
-            dd_1y = curr['Drawdown_1Y']
-            mom_12m = curr['Mom_12M']
-            
-            # Get Monthly Data
-            if not df_monthly.empty:
-                month_ma10 = df_monthly.iloc[-1]['MA10']
+        # Handle MultiIndex
+        if isinstance(df_all.columns, pd.MultiIndex):
+            if 'Adj Close' in df_all.columns.get_level_values(0):
+                data = df_all['Adj Close']
+            elif 'Close' in df_all.columns.get_level_values(0):
+                data = df_all['Close']
             else:
-                month_ma10 = np.nan
+                data = df_all
+        else:
+            data = df_all
             
-            # Check Macro
-            macro_signal = "Neutral"
-            macro_val = np.nan
-            if not df_macro.empty:
-                last_macro = df_macro.iloc[-1]
-                macro_val = last_macro.get('INDPRO_YoY', 0)
-                if macro_val < 0:
-                    macro_signal = "Recession"
-                else:
-                    macro_signal = "Expansion"
+        # Basic check
+        if data.empty:
+             return pd.DataFrame(), "Market data fetch failed or incomplete."
+             
+    except Exception as e:
+        return pd.DataFrame(), f"Error fetching market data: {str(e)}"
 
-            # Declining Momentum Check
-            prev_mom_12m = df.iloc[-20]['Mom_12M'] if len(df) > 20 else mom_12m
-            mom_declining = (mom_12m < prev_mom_12m)
-
-            # --- 4. Evaluate States ---
+    # 2. Fetch FRED Data (UNRATE & T10Y2Y)
+    try:
+        # Use robust fetch function
+        unrate = fetch_fred_data("UNRATE")
+        yc = fetch_fred_data("T10Y2Y") # Yield Curve
+        
+        if unrate.empty:
+            raise ValueError("Fetched empty data for UNRATE")
             
-            detected_state = "State 1"
-            detected_name = "正常定投 (Neutral)"
-            detected_color = "green"
-            detected_action = "保持基础权重（基准态）"
-            reasons = []
+        unrate.columns = ['UNRATE']
+        unrate = unrate[unrate.index >= fetch_start]
+        unrate_daily = unrate.reindex(data.index, method='ffill')
+        
+        if not yc.empty:
+            yc.columns = ['T10Y2Y']
+            yc = yc[yc.index >= fetch_start]
+            yc_daily = yc.reindex(data.index, method='ffill')
+        else:
+            yc_daily = pd.DataFrame(0.0, index=data.index, columns=['T10Y2Y'])
 
-            # Criteria Checks
-            s2_triggers = []
-            if vix >= 30: s2_triggers.append(f"VIX High ({vix:.1f} ≥ 30)")
-            if dd_1y <= -20: s2_triggers.append(f"Deep Drawdown ({dd_1y:.1f}% ≤ -20%)")
-            if price < (ma200 * 0.9): s2_triggers.append(f"Price < 0.9*MA200 ({price:.2f} < {ma200*0.9:.2f})")
-            
-            s5_triggers = []
-            if not np.isnan(month_ma10) and price < month_ma10: s5_triggers.append(f"Price < Month MA10 ({price:.2f} < {month_ma10:.2f})")
-            if mom_12m < 0: s5_triggers.append(f"Neg Momentum ({mom_12m*100:.1f}% < 0)")
-            if macro_signal == "Recession": s5_triggers.append(f"Macro Recession (INDPRO {macro_val:.2f}% < 0)")
+    except Exception as e:
+        # Fallback
+        return pd.DataFrame(), f"Error fetching FRED data: {str(e)}"
 
-            s4_triggers = []
-            if price > (ma200 * 1.2): s4_triggers.append(f"Price > 1.2*MA200 ({price:.2f} > {ma200*1.2:.2f})")
-            if vix < 15: s4_triggers.append(f"VIX Low ({vix:.1f} < 15)")
-            if mom_12m > 0 and mom_declining: s4_triggers.append("Momentum Declining (Div)")
+    # 3. Calculate Indicators
+    try:
+        # --- FIX: Calculate Sahm Rule on MONTHLY data first ---
+        # Sahm Rule: (3m avg) - (min of prev 12m of 3m avg)
+        u_monthly = unrate['UNRATE']
+        u_3m_avg = u_monthly.rolling(window=3).mean()
+        # Strict Sahm: Min of *previous* 12 months (shift 1 to exclude current)
+        u_12m_low = u_3m_avg.rolling(window=12).min().shift(1)
+        sahm_monthly = u_3m_avg - u_12m_low
+        
+        # Reindex Sahm Rule to Daily (ffill)
+        sahm_series = sahm_monthly.reindex(data.index, method='ffill')
+        
+        # Rate Shock: TNX 21-day ROC
+        # Handle missing columns gracefully
+        tnx_col = '^TNX' if '^TNX' in data.columns else data.columns[0] # Fallback if missing
+        tnx_roc = (data[tnx_col] - data[tnx_col].shift(21)) / data[tnx_col].shift(21)
+        
+        # Correlation: IWY vs TLT 60-day
+        if 'IWY' in data.columns and 'TLT' in data.columns:
+            corr = data['IWY'].rolling(60).corr(data['TLT'])
+            iwy_series = data['IWY']
+        else:
+            corr = pd.Series(0, index=data.index)
+            iwy_series = data.iloc[:, 0]
+        
+        # Trend: IWY vs MA200
+        iwy_ma200 = iwy_series.rolling(200).mean()
+        trend_bear = iwy_series < iwy_ma200
+        
+        # Gold Trend (GLD vs MA200)
+        gold_trend_bear = pd.Series(False, index=data.index)
+        if 'GLD' in data.columns:
+            gld_ma200 = data['GLD'].rolling(200).mean()
+            gold_trend_bear = data['GLD'] < gld_ma200
+            
+        # Style Trend (Growth vs Value)
+        style_value_regime = pd.Series(False, index=data.index)
+        if 'IWY' in data.columns and 'IWD' in data.columns:
+            pair_ratio = data['IWY'] / data['IWD']
+            pair_ma200 = pair_ratio.rolling(200).mean()
+            style_value_regime = pair_ratio < pair_ma200 # If Ratio < MA200, Value is winning
 
-            is_s3 = (price > ma200) and (mom_12m > 0) and (vix < 25)
-
-            status_style = "info" # default
+        # Assemble DataFrame
+        df_hist = pd.DataFrame({
+            'IWY': iwy_series,
+            'Sahm': sahm_series,
+            'RateShock': tnx_roc,
+            'Corr': corr,
+            'VIX': data.get('^VIX', pd.Series(0, index=data.index)),
+            'Trend_Bear': trend_bear,
+            'YieldCurve': yc_daily['T10Y2Y'],
+            'Gold_Bear': gold_trend_bear,
+            'Value_Regime': style_value_regime
+        }).dropna()
+        
+        # 4. Determine States
+        def determine_row_state(row):
+            is_rec = row['Sahm'] >= 0.50
+            is_shock = row['RateShock'] > 0.20
+            is_c_broken = row['Corr'] > 0.3
+            is_f = row['VIX'] > 32
+            is_down = row['Trend_Bear']
+            is_vol_elevated = row['VIX'] > 20
             
-            if len(s2_triggers) >= 2:
-                detected_state = "State 2"
-                detected_name = "🔴 恐慌加仓 (Accumulation)"
-                detected_action = "加大定投 IWY (45%)，WTMF (25%)"
-                reasons = s2_triggers
-                status_style = "error" # Red
+            # Yield Curve logic: Inverted is bad, but Un-inverting is recessionary.
+            # Simplified: Use it as a reinforcement? 
+            # For backtest state, we stick to core definitions but maybe refine "DEFLATION_RECESSION"
+            # if Yield Curve is un-inverting (T10Y2Y > 0 after being < 0). 
+            # Ideally needs state history. For now keeping simple.
             
-            elif len(s5_triggers) >= 2:
-                detected_state = "State 5"
-                detected_name = "⚫ 趋势破坏 / 防御 (Defense)"
-                detected_action = "停止所有风险资产定投，只保留防御 (WTMF/Cash)"
-                reasons = s5_triggers
-                status_style = "secondary" # Grey/Black ish
-                
-            elif len(s4_triggers) >= 2:
-                detected_state = "State 4"
-                detected_name = "🟠 高位风险 (Distribution)"
-                detected_action = "停止 IWY 定投，新资金只进防御层"
-                reasons = s4_triggers
-                status_style = "warning" # Orange
-                
-            elif is_s3:
-                detected_state = "State 3"
-                detected_name = "🟡 趋势恢复 (Recovery)"
-                detected_action = "恢复正常定投，不追高、不减仓"
-                reasons = ["Price > MA200", "Mom > 0", "VIX < 25"]
-                status_style = "warning" # Yellow-ish (Gold not avail, use warning)
-            
+            if is_shock or (is_rec and is_c_broken):
+                return "INFLATION_SHOCK"
+            elif is_rec or (is_down and row['VIX'] > 35):
+                return "DEFLATION_RECESSION"
+            elif is_f and not is_shock and not is_rec:
+                return "EXTREME_ACCUMULATION"
+            elif is_down and not is_vol_elevated:
+                return "CAUTIOUS_TREND" # Bearish but low vol
+            elif is_vol_elevated: 
+                 return "CAUTIOUS_VOL"
             else:
-                detected_state = "State 1"
-                detected_name = "🟢 正常定投 (Neutral)"
-                detected_action = "保持基础权重（基准态）"
-                reasons = ["Normal Conditions"]
-                status_style = "success" # Green
+                return "NEUTRAL"
 
-            status_text.empty() # Clear loading text
+        df_hist['State'] = df_hist.apply(determine_row_state, axis=1)
+        
+        # Filter Output to requested range (removing buffer)
+        df_final = df_hist.loc[(df_hist.index >= pd.to_datetime(start_date)) & (df_hist.index <= pd.to_datetime(end_date))]
+        
+        return df_final, None
 
-            # --- 5. UI Rendering ---
+    except Exception as e:
+        return pd.DataFrame(), f"Error in calculation: {str(e)}"
+
+def render_state_machine_check():
+    st.header("🛡️ 宏观状态机与资产配置 (Macro State & Allocation)")
+    st.caption("基于宏观因子 (利率、失业率、波动率、相关性) 的全自动资产配置生成器。")
+
+    # --- Manual Data Import (Fallback) ---
+    with st.expander("📂 手动导入宏观数据 (网络受限时使用)", expanded=False):
+        st.info("如果网络受限导致 FRED 数据 (UNRATE, T10Y2Y) 获取失败，请手动下载并上传 CSV 文件。系统将自动优先读取本地文件。")
+        
+        col_u1, col_u2 = st.columns(2)
+        import time
+
+        with col_u1:
+            st.markdown("**1. 失业率 (UNRATE)**")
             
-            # A. Main Status Card
-            with st.container():
-                st.markdown(f"### 🏁 Diagnosis Result: {detected_name}")
-                if status_style == "error":
-                    st.error(f"**Action Plan**: {detected_action}")
-                elif status_style == "warning":
-                    st.warning(f"**Action Plan**: {detected_action}")
-                elif status_style == "success":
-                    st.success(f"**Action Plan**: {detected_action}")
-                else:
-                    st.info(f"**Action Plan**: {detected_action}")
+            # Check local file
+            unrate_path = os.path.join(os.path.dirname(__file__), "fred_UNRATE.csv")
+            if os.path.exists(unrate_path):
+                file_time = datetime.datetime.fromtimestamp(os.path.getmtime(unrate_path)).strftime('%Y-%m-%d %H:%M')
+                st.success(f"✅ 已检测到本地数据 (更新于 {file_time})")
+            else:
+                st.warning("⚠️ 未检测到本地文件")
 
-                if reasons:
-                    st.caption(f"**Triggered Criteria**: {', '.join(reasons)}")
-
-            st.divider()
-
-            # B. Metrics Row
-            st.markdown("#### 📊 Key Indicators (关键指标)")
-            m1, m2, m3, m4 = st.columns(4)
+            st.markdown("[📥 点击下载 UNRATE.csv](https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE)")
+            uploaded_file = st.file_uploader("更新 UNRATE.csv", type=['csv'], key="uploader_unrate")
             
-            m1.metric("Price vs MA200", f"${price:.2f}", delta=f"{(price/ma200-1)*100:.1f}%", help="Distance from 200-day Moving Average")
-            m2.metric("12M Momentum", f"{mom_12m*100:.1f}%", delta="Declining" if mom_declining else "Rising", delta_color="inverse" if mom_declining else "normal", help="1-Year Price Change")
-            m3.metric("VIX Index", f"{vix:.2f}", delta=f"{vix-15:.1f} (Ref 15)", delta_color="inverse", help="Volatility Index")
-            m4.metric("Macro (INDPRO)", f"{macro_val:.2f}%" if not np.isnan(macro_val) else "N/A", macro_signal, delta_color="normal" if macro_val>0 else "inverse", help="Industrial Production YoY")
+            if uploaded_file is not None:
+                # Deduplication logic to avoid infinite reruns
+                file_id = f"{uploaded_file.name}-{uploaded_file.size}"
+                if st.session_state.get("processed_unrate_id") != file_id:
+                    try:
+                        df_test = pd.read_csv(uploaded_file)
+                        if 'observation_date' in df_test.columns:
+                            uploaded_file.seek(0)
+                            with open(unrate_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+                            
+                            st.session_state["processed_unrate_id"] = file_id
+                            st.success("✅ UNRATE 已保存! 正在刷新...")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("CSV 格式错误: 缺少 'observation_date' 列")
+                    except Exception as e:
+                        st.error(f"文件处理错误: {e}")
 
-            # C. Visual Context (Charts)
-            st.markdown("#### 📉 Visual Context (趋势与环境)")
+        with col_u2:
+            st.markdown("**2. 收益率曲线 (T10Y2Y)**")
             
-            # Prepare Chart Data (Last 12 Months)
-            chart_start = end_date - pd.DateOffset(months=18)
-            mask = df.index >= chart_start
-            chart_df = df.loc[mask]
+            # Check local file
+            yc_path = os.path.join(os.path.dirname(__file__), "fred_T10Y2Y.csv")
+            if os.path.exists(yc_path):
+                file_time = datetime.datetime.fromtimestamp(os.path.getmtime(yc_path)).strftime('%Y-%m-%d %H:%M')
+                st.success(f"✅ 已检测到本地数据 (更新于 {file_time})")
+            else:
+                st.warning("⚠️ 未检测到本地文件")
+
+            st.markdown("[📥 点击下载 T10Y2Y.csv](https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y2Y)")
+            uploaded_yc = st.file_uploader("更新 T10Y2Y.csv", type=['csv'], key="uploader_t10y2y")
             
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                                vertical_spacing=0.05, 
-                                row_heights=[0.5, 0.25, 0.25],
-                                subplot_titles=("Price & MA200", "VIX (Volatility)", "Momentum (12M)"))
+            if uploaded_yc is not None:
+                # Deduplication logic to avoid infinite reruns
+                file_id = f"{uploaded_yc.name}-{uploaded_yc.size}"
+                if st.session_state.get("processed_t10y2y_id") != file_id:
+                    try:
+                        df_test = pd.read_csv(uploaded_yc)
+                        if 'observation_date' in df_test.columns:
+                            uploaded_yc.seek(0)
+                            with open(yc_path, "wb") as f:
+                                f.write(uploaded_yc.getbuffer())
+                            
+                            st.session_state["processed_t10y2y_id"] = file_id
+                            st.cache_data.clear()
+                            st.success("✅ T10Y2Y 已保存! 正在刷新...")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("CSV 格式错误: 缺少 'observation_date' 列")
+                    except Exception as e:
+                        st.error(f"文件处理错误: {e}")
 
-            # Row 1: Price & MA200
-            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['Close'], name='IWY Price', line=dict(color='black', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA200'], name='MA200', line=dict(color='orange', width=1)), row=1, col=1)
+    # --- State Reference Guide (Resident Folded Display) ---
+    with st.expander("📖 宏观状态定义与策略对照表 (State Machine Reference)", expanded=False):
+        st.info("💡 提示：本模型实时扫描市场，一旦触发以下任一状态，系统将自动建议对应的防御或进攻仓位。")
+        
+        c_ref1, c_ref2, c_ref3, c_ref4, c_ref5 = st.columns(5)
+        
+        with c_ref1:
+            st.error("🔴 滞胀/加息冲击\n(INFLATION SHOCK)")
+            st.markdown("""
+            **🛡️ 触发条件**:  
+            1. **利率冲击**: TNX 21日涨幅 > 20%  
+            2. **或** (衰退 + 股债相关性失效)
             
-            # Row 2: VIX
-            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['VIX'], name='VIX', line=dict(color='purple', width=1)), row=2, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="red", row=2, col=1, annotation_text="Panic (30)")
-            fig.add_hline(y=15, line_dash="dash", line_color="green", row=2, col=1, annotation_text="Complacency (15)")
+            **📉 策略**: **现金为王 (Anti-Duration)**  
+            - **清仓** 成长股 & REITs (0%)  
+            - **清仓** 长债 (0%)  
+            - **重仓** 危机Alpha (WTMF) & 现金  
+            - **配置** 黄金 (适量)
+            """)
+            
+        with c_ref2:
+            st.info("🔵 衰退/崩盘\n(DEFLATION RECESSION)")
+            st.markdown("""
+            **🛡️ 触发条件**:  
+            1. **衰退**: 萨姆规则 (Sahm ≥ 0.5)  
+            2. **或** (趋势向下 + VIX > 35)
+            
+            **📉 策略**: **全面防御 (Long Duration)**  
+            - **减持** 成长股 (至 10%)  
+            - **重仓** 国债 (MBH/TLT) 锁定收益  
+            - **重仓** 黄金 (避险)  
+            - **低配** REITs (规避信用风险)
+            """)
+            
+        with c_ref3:
+            st.warning("🚀 极度贪婪/抄底\n(EXTREME ACCUMULATION)")
+            st.markdown("""
+            **🛡️ 触发条件**:  
+            1. **恐慌**: VIX > 32  
+            2. 且 **非** 利率冲击  
+            3. 且 **非** 衰退
+            
+            **📈 策略**: **重仓进攻 (Leverage)**  
+            - **增持** 成长股 (至 70%)  
+            - **卖出** 防御资产  
+            - **利用** 恐慌买入
+            """)
+            
+        with c_ref4:
+            st.warning("⚠️ 谨慎 (CAUTIOUS)")
+            st.markdown("""
+            **A. 趋势破位 (Trend)**:  
+            Price < MA200 且 VIX < 20  
+            *策略*: **防御 (Defensive)** - 重仓红利/现金
+            
+            **B. 高波震荡 (Vol)**:  
+            Price > MA200 且 VIX > 20  
+            *策略*: **对冲 (Hedge)** - 保留成长+危机Alpha
+            """)
+            
+        with c_ref5:
+            st.success("🟢 常态/牛市\n(NEUTRAL)")
+            st.markdown("""
+            **🛡️ 触发条件**:  
+            - 无上述风险信号  
+            - VIX < 20 且 趋势向上
+            
+            **📈 策略**: **标准配置 (Growth)**  
+            - **成长** IWY (50%)  
+            - **红利** LVHI (10%)  
+            - **蓝筹** G3B (10%)  
+            - **债券** MBH (10%)
+            """)
 
-            # Row 3: Momentum
-            fig.add_trace(go.Bar(x=chart_df.index, y=chart_df['Mom_12M']*100, name='Mom 12M %', marker_color=np.where(chart_df['Mom_12M']<0, 'red', 'green')), row=3, col=1)
-            fig.add_hline(y=0, line_color="black", row=3, col=1)
+    # --- Import from Portfolio Backtest ---
+    saved_portfolios = load_portfolios()
+    if saved_portfolios:
+        with st.expander("📥 从已保存的投资组合导入 (Import from Saved)", expanded=False):
+            st.info("提示：这将把选定组合的配置比例转换为对应市值的持仓。")
+            c_imp1, c_imp2, c_imp3 = st.columns([2, 1, 1])
+            with c_imp1:
+                sel_port_name = st.selectbox("选择组合", list(saved_portfolios.keys()), key="sm_imp_name")
+            with c_imp2:
+                imp_total_cap = st.number_input("设定总本金 (Total Value)", value=10000.0, step=1000.0, key="sm_imp_cap")
+            with c_imp3:
+                if st.button("应用到下方持仓", type="secondary"):
+                    # Logic to populate session state
+                    if sel_port_name in saved_portfolios:
+                        p_data = saved_portfolios[sel_port_name]
+                        weights = p_data.get("weights", {})
+                        
+                        # 1. Reset known fields
+                        known_tickers = ['IWY', 'WTMF', 'LVHI', 'G3B.SI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI']
+                        for t in known_tickers:
+                            st.session_state[f"hold_{t}"] = 0.0
+                        st.session_state["hold_OTHERS"] = 0.0
+                            
+                        # 2. Populate from portfolio
+                        other_val = 0.0
+                        for t, w in weights.items():
+                            val = imp_total_cap * (w / 100.0)
+                            if t in known_tickers:
+                                st.session_state[f"hold_{t}"] = val
+                            else:
+                                other_val += val
+                        
+                        st.session_state["hold_OTHERS"] = other_val
+                            
+                        st.toast(f"已导入组合: {sel_port_name} (含其他资产 ${other_val:,.0f})", icon="✅")
+                        st.rerun()
 
-            fig.update_layout(height=700, template="plotly_white", hovermode="x unified", showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+    # --- 1. Input Section (Current Holdings) ---
+    with st.expander("💼 输入当前持仓 (Current Portfolio Holdings)", expanded=True):
+        st.markdown("请输入您当前账户中各标的的**市值 (Value)** (单位：美元/新元均可，统一即可)。")
+        
+        col_in1, col_in2, col_in3, col_in4 = st.columns(4)
+        
+        # Initialize session state keys if they don't exist
+        defaults = {
+            "hold_IWY": 0.0, "hold_WTMF": 0.0, "hold_LVHI": 0.0,
+            "hold_G3B.SI": 0.0, "hold_MBH.SI": 0.0, "hold_GSD.SI": 0.0,
+            "hold_SRT.SI": 0.0, "hold_AJBU.SI": 0.0, "hold_OTHERS": 0.0
+        }
+        for k, v in defaults.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
 
-            # D. Detailed Data Table
-            with st.expander("🔎 查看详细数据 (Detailed Data)", expanded=False):
-                st.write(f"**Analysis Date**: {curr_date.date()}")
+        # We use number_input keys to auto-update session state
+        # Note: 'value' argument is removed to rely solely on session_state[key]
+        with col_in1:
+            val_iwy = st.number_input("IWY (美股成长)", step=100.0, key="hold_IWY")
+            val_wtmf = st.number_input("WTMF (危机Alpha)", step=100.0, key="hold_WTMF")
+        with col_in2:
+            val_lvhi = st.number_input("LVHI (美股红利)", step=100.0, key="hold_LVHI")
+            val_g3b = st.number_input("G3B.SI (新加坡蓝筹)", step=100.0, key="hold_G3B.SI")
+        with col_in3:
+            val_mbh = st.number_input("MBH.SI (新元债券)", step=100.0, key="hold_MBH.SI")
+            val_gsd = st.number_input("GSD.SI (黄金)", step=100.0, key="hold_GSD.SI")
+        with col_in4:
+            val_srt = st.number_input("SRT.SI (REITs)", step=100.0, key="hold_SRT.SI")
+            val_ajbu = st.number_input("AJBU.SI (REITs)", step=100.0, key="hold_AJBU.SI")
+            val_others = st.number_input("其他资产 (Others)", step=100.0, key="hold_OTHERS", help="Imported assets not in strategy list (Action: Sell)")
+            
+        current_holdings = {
+            'IWY': val_iwy, 'WTMF': val_wtmf, 'LVHI': val_lvhi,
+            'G3B.SI': val_g3b, 'MBH.SI': val_mbh, 'GSD.SI': val_gsd,
+            'SRT.SI': val_srt, 'AJBU.SI': val_ajbu, 'OTHERS': val_others
+        }
+        
+        total_value = sum(current_holdings.values())
+        st.caption(f"💰 当前账户总市值: **{total_value:,.2f}**")
+
+    # --- 2. Diagnosis Button ---
+    if st.button("🚀 开始诊断与配置生成 (Run Analysis)", type="primary", use_container_width=True):
+        # Result Containers
+        status_container = st.container()
+        result_container = st.container()
+
+        # Data placeholders
+        data = pd.DataFrame()
+        unrate_curr = pd.Series()
+        fetch_errors = []
+        df_hist = pd.DataFrame()
+        
+        with status_container:
+            with st.status("正在进行全市场扫描与宏观诊断...", expanded=True) as status:
                 
-                # Create a clean dataframe for display
-                detail_data = {
-                    "Metric": ["Price", "MA200", "Month MA10", "1Y High", "1Y Drawdown", "VIX", "12M Momentum", "Macro (INDPRO)"],
-                    "Value": [
-                        f"${price:.2f}", 
-                        f"${ma200:.2f}", 
-                        f"${month_ma10:.2f}" if not np.isnan(month_ma10) else "N/A",
-                        f"${curr['High_1Y']:.2f}",
-                        f"{dd_1y:.1f}%",
-                        f"{vix:.2f}",
-                        f"{mom_12m*100:.1f}%",
-                        f"{macro_val:.2f}%" if not np.isnan(macro_val) else "N/A"
-                    ],
-                    "Reference / Trigger": [
-                        "-", 
-                        "Trend Baseline", 
-                        "State 5 Trigger (Price < MA10)",
-                        "-",
-                        "State 2 Trigger (≤ -20%)",
-                        "State 2 (≥30) / State 4 (<15)",
-                        "State 5 (<0) / State 3 (>0)",
-                        "State 5 (<0)"
-                    ]
+                # --- A. Fetch Data ---
+                st.write("📡 步骤 1/3: 获取实时市场行情 (Yahoo Finance)...")
+                end = datetime.datetime.now()
+                # Increase lookback to 3 years to ensure enough history for Sahm Rule (12m + 3m rolling)
+                start = end - datetime.timedelta(days=1095)
+                
+                try:
+                    tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD']
+                    df_all = yf.download(tickers, start=start, end=end, progress=False, auto_adjust=False)
+                    
+                    if df_all.empty:
+                        raise ValueError("Yahoo Finance 返回空数据")
+                    
+                    # Handle MultiIndex columns safely
+                    if isinstance(df_all.columns, pd.MultiIndex):
+                        if 'Adj Close' in df_all.columns.get_level_values(0):
+                            data = df_all['Adj Close']
+                        elif 'Close' in df_all.columns.get_level_values(0):
+                             data = df_all['Close']
+                        else:
+                             data = df_all
+                    else:
+                        data = df_all
+                    
+                    if data.empty:
+                         raise ValueError("解析后的行情数据为空")
+                         
+                    st.write("✅ 市场行情数据获取成功")
+                except Exception as e:
+                    fetch_errors.append(f"市场数据错误: {str(e)}")
+                    st.error(f"❌ 市场数据获取失败: {e}")
+                    status.update(label="诊断中断：数据获取失败", state="error")
+                    st.stop()
+
+                st.write("📊 步骤 2/3: 同步美联储宏观数据 (FRED)...")
+                is_fred_live = True
+                try:
+                    # Use robust fetch function
+                    unrate = fetch_fred_data("UNRATE")
+                    yc_data = fetch_fred_data("T10Y2Y") # Yield Curve
+                    
+                    if unrate.empty:
+                        raise ValueError("Fetched empty data for UNRATE")
+                        
+                    unrate.columns = ['UNRATE']
+                    unrate = unrate[(unrate.index >= start) & (unrate.index <= end)]
+                    unrate_curr = unrate['UNRATE']
+                    
+                    if not yc_data.empty:
+                        yc_data.columns = ['T10Y2Y']
+                        yc_data = yc_data[(yc_data.index >= start) & (yc_data.index <= end)]
+                        yc_curr = yc_data['T10Y2Y']
+                    else:
+                        yc_curr = pd.Series()
+
+                    if unrate_curr.empty:
+                        raise ValueError("FRED 数据范围为空")
+                    st.write("✅ 宏观数据 (UNRATE/Yield) 同步成功")
+                except Exception as e:
+                    is_fred_live = False
+                    st.write(f"⚠️ FRED 连接超时/失败 ({str(e)})，启用应急兜底数据 (常态假设)...")
+                    dates = pd.date_range(start=start, end=end, freq='M')
+                    unrate_curr = pd.Series([4.0]*len(dates), index=dates)
+                    yc_curr = pd.Series([0.5]*len(dates), index=dates)
+
+                # --- B. Process Signals ---
+                st.write("⚙️ 步骤 3/3: 正在计算核心因子 (萨姆规则、利率冲击、波动率)...")
+                
+                try:
+                    # 1. Sahm Rule
+                    unrate_clean = unrate_curr.dropna()
+                    u_3m = unrate_clean.rolling(3).mean().dropna()
+                    
+                    if len(u_3m) >= 14:
+                        current_sahm_avg = u_3m.iloc[-1]
+                        prev_12m_min = u_3m.iloc[-13:-1].min()
+                        sahm_val = current_sahm_avg - prev_12m_min
+                    else:
+                        sahm_val = 0.0
+                    
+                    if pd.isna(sahm_val): sahm_val = 0.0
+                    is_recession = sahm_val >= 0.50
+
+                    # 2. Rate Shock
+                    tnx = data['^TNX'].dropna()
+                    if len(tnx) >= 22:
+                        tnx_roc = (tnx.iloc[-1] - tnx.iloc[-21]) / tnx.iloc[-21]
+                    else:
+                        tnx_roc = 0.0
+                    is_rate_shock = tnx_roc > 0.20
+
+                    # 3. Correlation
+                    corr_series = data['IWY'].rolling(60).corr(data['TLT']).dropna()
+                    if not corr_series.empty:
+                        corr = corr_series.iloc[-1]
+                    else:
+                        corr = 0.0
+                    is_corr_broken = corr > 0.3
+
+                    # 4. Fear (Smoothed)
+                    vix_series = data['^VIX'].dropna()
+                    if not vix_series.empty:
+                        vix_ma = vix_series.rolling(5).mean()
+                        vix = vix_ma.iloc[-1] if not vix_ma.empty else vix_series.iloc[-1]
+                    else:
+                        vix = 0.0
+                    is_fear = vix > 32
+                    is_elevated_vix = vix > 20
+
+                    # 5. Trend (Price vs MA200)
+                    iwy_series = data['IWY'].dropna()
+                    is_downtrend = False
+                    if len(iwy_series) >= 200:
+                        iwy_price = iwy_series.iloc[-1]
+                        iwy_ma200 = iwy_series.rolling(200).mean().iloc[-1]
+                        is_downtrend = iwy_price < iwy_ma200
+                        
+                    # 6. Yield Curve (Recession Warning)
+                    yc_val = 0.0
+                    yc_status = "Normal"
+                    yc_un_inverting = False
+                    if not yc_curr.empty:
+                        yc_clean = yc_curr.dropna()
+                        if not yc_clean.empty:
+                            yc_val = yc_clean.iloc[-1]
+                            # Check for un-inversion (was negative recently, now rising)
+                            # Simple check: Current > -0.1 AND Min of last 6 months < -0.3
+                            recent_min = yc_clean.iloc[-126:].min() if len(yc_clean) > 126 else -1.0
+                            if yc_val < 0:
+                                yc_status = "Inverted (Warning)"
+                            elif yc_val < 0.2 and recent_min < -0.2:
+                                yc_status = "Un-inverting (Danger)"
+                                yc_un_inverting = True
+                            else:
+                                yc_status = "Normal"
+
+                    # 7. Gold Trend (Optimization)
+                    is_gold_bear = False
+                    if 'GLD' in data.columns:
+                        gld_s = data['GLD'].dropna()
+                        if len(gld_s) > 200:
+                            gld_price = gld_s.iloc[-1]
+                            gld_ma200 = gld_s.rolling(200).mean().iloc[-1]
+                            is_gold_bear = gld_price < gld_ma200
+
+                    # 8. Style Trend (Growth vs Value)
+                    is_value_regime = False
+                    if 'IWY' in data.columns and 'IWD' in data.columns:
+                        iwy_s = data['IWY'].dropna()
+                        iwd_s = data['IWD'].dropna()
+                        # Align
+                        common_idx = iwy_s.index.intersection(iwd_s.index)
+                        if len(common_idx) > 200:
+                            ratio = iwy_s.loc[common_idx] / iwd_s.loc[common_idx]
+                            ratio_ma200 = ratio.rolling(200).mean()
+                            if ratio.iloc[-1] < ratio_ma200.iloc[-1]:
+                                is_value_regime = True
+                    
+                    st.write("⏳ 正在回溯历史状态序列 (用于绘图)...")
+                    # --- Historical State Backtest ---
+                    # 1. Align Data
+                    # Reindex UNRATE to daily (ffill)
+                    unrate_daily = unrate_curr.reindex(data.index, method='ffill')
+                    
+                    # 2. Vectorized Calculations
+                    # Sahm: (3m avg) - (min of prev 12m of 3m avg)
+                    u_3m_hist = unrate_daily.rolling(3).mean()
+                    # FIX: Strict lag (shift 1) to exclude current month from min
+                    u_3m_min_hist = u_3m_hist.rolling(12).min().shift(1)
+                    sahm_series_hist = u_3m_hist - u_3m_min_hist
+                    
+                    # Rate Shock: 21-day ROC
+                    tnx_hist = data['^TNX']
+                    tnx_roc_hist = (tnx_hist - tnx_hist.shift(21)) / tnx_hist.shift(21)
+                    
+                    # Correlation: 60-day rolling
+                    corr_hist = data['IWY'].rolling(60).corr(data['TLT'])
+                    
+                    # VIX
+                    vix_hist = data['^VIX']
+                    
+                    # Trend
+                    iwy_hist = data['IWY']
+                    iwy_ma200_hist = iwy_hist.rolling(200).mean()
+                    
+                    # 3. Combine into DataFrame
+                    df_hist = pd.DataFrame({
+                        'IWY': iwy_hist,
+                        'Sahm': sahm_series_hist,
+                        'RateShock': tnx_roc_hist,
+                        'Corr': corr_hist,
+                        'VIX': vix_hist,
+                        'Trend_Bear': iwy_hist < iwy_ma200_hist
+                    }).dropna()
+                    
+                    # 4. Determine State for each row
+                    def determine_row_state(row):
+                        is_rec = row['Sahm'] >= 0.50
+                        is_shock = row['RateShock'] > 0.20
+                        is_c_broken = row['Corr'] > 0.3
+                        is_f = row['VIX'] > 32
+                        is_down = row['Trend_Bear']
+                        is_vol_elevated = row['VIX'] > 20
+                        
+                        if is_shock or (is_rec and is_c_broken):
+                            return "INFLATION_SHOCK"
+                        elif is_rec or (is_down and row['VIX'] > 35):
+                            return "DEFLATION_RECESSION"
+                        elif is_f and not is_shock and not is_rec:
+                            return "EXTREME_ACCUMULATION"
+                        elif is_down and not is_vol_elevated:
+                            return "CAUTIOUS_TREND"
+                        elif is_vol_elevated:
+                             return "CAUTIOUS_VOL"
+                        else:
+                            return "NEUTRAL"
+
+                    df_hist['State'] = df_hist.apply(determine_row_state, axis=1)
+
+                    st.write("✅ 因子计算完成")
+                    status.update(label="诊断完成", state="complete", expanded=False)
+                    
+                except Exception as e:
+                    st.error(f"❌ 计算过程出错: {e}")
+                    status.update(label="诊断失败", state="error")
+                    st.stop()
+
+        # --- C. Determine & Render State ---
+        with result_container:
+            # Logic Determination
+            state = "NEUTRAL"
+            state_display = "🟢 常态 / 牛市 (Neutral)"
+            state_desc = "市场运行平稳，维持标准增长配置。"
+            state_bg_color = "#e6f4ea" # Light Green
+            state_border_color = "#1e8e3e"
+            state_icon = "🟢"
+
+            # Cautious triggers
+            is_cautious_trend = is_downtrend and (vix <= 20)
+            is_cautious_vol = (vix > 20)
+
+            # Optimization: Yield Curve Steepening (Un-inverting) is a Recession Risk
+            is_recession_risk = is_recession or (yc_un_inverting)
+
+            if is_rate_shock or (is_recession_risk and is_corr_broken):
+                state = "INFLATION_SHOCK"
+                state_display = "🔴 滞胀 / 加息冲击 (Inflation Shock)"
+                state_desc = "⚠️ 警报：利率飙升或出现股债双杀。现金与抗通胀资产为王。"
+                state_bg_color = "#fce8e6" # Light Red
+                state_border_color = "#d93025"
+                state_icon = "🔴"
+            elif is_recession_risk or (is_downtrend and vix > 35):
+                state = "DEFLATION_RECESSION"
+                state_display = "🔵 衰退 / 崩盘 (Deflation/Crash)"
+                state_desc = "⚠️ 警报：经济衰退或流动性危机确认。全面防御，持有国债与美元。"
+                state_bg_color = "#e8f0fe" # Light Blue
+                state_border_color = "#1a73e8"
+                state_icon = "🔵"
+            elif is_fear and not is_rate_shock and not is_recession_risk:
+                state = "EXTREME_ACCUMULATION"
+                state_display = "🚀 极度贪婪 / 抄底 (Accumulation)"
+                state_desc = "🔔 机会：恐慌过度但基本面未崩坏。建议重仓抄底成长股。"
+                state_bg_color = "rgba(142, 36, 170, 0.2)" # Purple
+                state_border_color = "#8e24aa"
+                state_icon = "🚀"
+            elif is_cautious_trend:
+                state = "CAUTIOUS_TREND"
+                state_display = "⚠️ 谨慎 / 趋势破位 (Bear Trend)"
+                state_desc = "📉 提示：长期趋势转空但恐慌未起。阴跌风险大，建议重仓红利与现金。"
+                state_bg_color = "#fff3e0" # Light Orange
+                state_border_color = "#f57c00"
+                state_icon = "📉"
+            elif is_cautious_vol:
+                state = "CAUTIOUS_VOL"
+                state_display = "⚡ 谨慎 / 高波震荡 (High Volatility)"
+                state_desc = "🌊 提示：趋势尚可但波动加剧。可能是牛市回调，建议保留成长并增加对冲。"
+                state_bg_color = "#fff8e1" # Lighter Orange
+                state_border_color = "#ffb74d"
+                state_icon = "⚡"
+
+            # 1. State Header (Custom styled box)
+            st.markdown(f"""
+            <div style="padding: 20px; border-radius: 10px; background-color: {state_bg_color}; border-left: 6px solid {state_border_color}; margin-bottom: 20px;">
+                <h2 style="margin:0; color: #202124;">{state_icon} {state_display}</h2>
+                <p style="margin-top:10px; font-size: 16px; color: #5f6368;">{state_desc}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if not is_fred_live:
+                st.warning("⚠️ 注意：宏观数据 (UNRATE/Yield) 使用的是默认安全值，可能会掩盖真实的衰退信号。请稍后重试或手动确认 FRED 数据源。", icon="⚠️")
+
+            # 1.5. Factor Dashboard (New)
+            st.markdown("### 📊 核心因子看板 (Key Factors)")
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+            
+            with f_col1:
+                st.metric(
+                    "利率冲击 (TNX ROC)", 
+                    f"{tnx_roc:+.1%}", 
+                    f"{'⚠️ 触发 (>20%)' if is_rate_shock else '✅ 安全'}",
+                    delta_color="inverse" if is_rate_shock else "normal"
+                )
+            with f_col2:
+                # Combine Sahm & Yield Curve
+                sub_label = "Sahm Risk" if is_recession else ("Yield Curve Danger" if yc_un_inverting else "Safe")
+                st.metric(
+                    "衰退信号 (Recession)", 
+                    f"{sahm_val:.2f}", 
+                    f"{'⚠️ ' + sub_label if is_recession or yc_un_inverting else '✅ 安全'}",
+                    delta_color="inverse" if is_recession or yc_un_inverting else "normal",
+                    help=f"Sahm Rule: {sahm_val:.2f} (>=0.50 Risk)\nYield Curve: {yc_status}"
+                )
+            with f_col3:
+                 st.metric(
+                    "股债相关性 (Corr)", 
+                    f"{corr:.2f}", 
+                    f"{'⚠️ 失效 (>0.30)' if is_corr_broken else '✅ 正常'}",
+                    delta_color="inverse" if is_corr_broken else "normal"
+                )
+            with f_col4:
+                 st.metric(
+                    "恐慌指数 (VIX)", 
+                    f"{vix:.1f}", 
+                    f"{'⚠️ 恐慌 (>32)' if is_fear else '✅ 正常'}",
+                    delta_color="inverse" if is_fear else "normal"
+                )
+            
+            st.markdown("---")
+            
+            # Sub-dashboard for Optimizations
+            st.markdown("#### 🎯 策略优化指标 (Optimization Signals)")
+            opt_c1, opt_c2, opt_c3 = st.columns(3)
+            with opt_c1:
+                st.metric("美债收益率曲线 (10Y-2Y)", f"{yc_val:.2f}%", yc_status, delta_color="off" if "Normal" in yc_status else "inverse")
+            with opt_c2:
+                st.metric("黄金趋势 (Gold Trend)", "Bearish (Weak)" if is_gold_bear else "Bullish (Strong)", "Avoid Gold" if is_gold_bear else "Hold Gold", delta_color="inverse" if is_gold_bear else "normal")
+            with opt_c3:
+                st.metric("风格轮动 (Style)", "Value Regime" if is_value_regime else "Growth Regime", "Tilt Value" if is_value_regime else "Tilt Growth", delta_color="off")
+
+
+            # 2. Logic Breakdown (Detailed Table)
+            st.subheader("🔍 状态判定逻辑详解 (Logic Breakdown)")
+            
+            logic_data = [
+                {
+                    "Factor": "利率冲击 (Rate Shock)",
+                    "Indicator": "TNX (10Y Yield) ROC",
+                    "Current Value": f"{tnx_roc:+.1%}",
+                    "Threshold": "> +20%",
+                    "Status": "🚨 触发 (Triggered)" if is_rate_shock else "✅ 安全 (Safe)",
+                    "Description": "美债收益率是否在短期内剧烈飙升，导致资产估值重估。"
+                },
+                {
+                    "Factor": "衰退信号 (Recession)",
+                    "Indicator": "Sahm Rule | Yield Curve",
+                    "Current Value": f"{sahm_val:.2f} | {yc_val:.2f}%",
+                    "Threshold": "Sahm≥0.5 | Un-invert",
+                    "Status": "🚨 触发 (Triggered)" if is_recession_risk else "✅ 安全 (Safe)",
+                    "Description": "基于萨姆规则或收益率曲线陡峭化（解倒挂），判断衰退风险。"
+                },
+                {
+                    "Factor": "股债相关性 (Correlation)",
+                    "Indicator": "Corr(IWY, TLT) 60d",
+                    "Current Value": f"{corr:.2f}",
+                    "Threshold": "> 0.30",
+                    "Status": "🚨 失效 (Broken)" if is_corr_broken else "✅ 负相关 (Normal)",
+                    "Description": "股债是否同涨同跌。若失效，则传统对冲策略无效。"
+                },
+                {
+                    "Factor": "市场恐慌 (Fear)",
+                    "Indicator": "VIX Index",
+                    "Current Value": f"{vix:.1f}",
+                    "Threshold": "> 32.0",
+                    "Status": "🚨 恐慌 (Panic)" if is_fear else "✅ 正常 (Normal)",
+                    "Description": "市场波动率指数，反映投资者恐慌程度。"
+                },
+                {
+                    "Factor": "趋势形态 (Trend)",
+                    "Indicator": "IWY Price vs MA200",
+                    "Current Value": "Bearish" if is_downtrend else "Bullish",
+                    "Threshold": "Price < MA200",
+                    "Status": "📉 下行 (Downtrend)" if is_downtrend else "📈 上行 (Uptrend)",
+                    "Description": "长期趋势是否已经破坏。"
                 }
-                st.table(pd.DataFrame(detail_data))
+            ]
+            
+            st.dataframe(
+                pd.DataFrame(logic_data),
+                column_config={
+                    "Factor": "宏观因子",
+                    "Indicator": "观测指标",
+                    "Current Value": "当前数值",
+                    "Threshold": "触发阈值",
+                    "Status": "状态判定",
+                    "Description": "说明"
+                },
+                use_container_width=True,
+                hide_index=True
+            )
 
-        except Exception as e:
-            status_text.error(f"Analysis Failed: {str(e)}")
+            # 3. Allocation Calculation
+            # Optimization Modifiers
+            # If Gold is Bearish (Price < MA200), reduce Gold, add to Cash/Bonds (WTMF/MBH)
+            # If Value Regime, Tilt Growth -> Dividend
+            
+            targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime)
+            
+            # Table Data Prep
+            rebal_data = []
+            if total_value == 0:
+                st.warning("⚠️ 请在上方位输入持仓市值，以获取调仓建议。")
+                
+            # Use Union of Strategy Targets and Current Holdings (to catch OTHERS)
+            all_tickers = set(targets.keys()).union(current_holdings.keys())
+            
+            for tkr in all_tickers:
+                tgt_pct = targets.get(tkr, 0.0) # 0% for non-strategy assets (OTHERS)
+                curr_val = current_holdings.get(tkr, 0)
+                curr_pct = curr_val / total_value if total_value > 0 else 0
+                
+                diff_pct = tgt_pct - curr_pct
+                diff_val = diff_pct * total_value if total_value > 0 else 0
+                
+                # Action Logic
+                action = "✅ 持有 (Hold)"
+                
+                # Force Sell for Non-Strategy Assets
+                if tkr not in targets:
+                     if curr_val > 0:
+                         action = f"🔴 清仓 (Sell All) {curr_val:,.0f}"
+                else:
+                    # Crisis Mode: Strict
+                    if state in ["INFLATION_SHOCK", "DEFLATION_RECESSION"]:
+                         if abs(diff_pct) > 0.01:
+                            if diff_val > 0: action = f"🟢 买入 {abs(diff_val):,.0f}"
+                            else: action = f"🔴 卖出 {abs(diff_val):,.0f}"
+                    else:
+                        # Normal Mode: Buffer
+                        if diff_pct > 0.05:
+                            action = f"🟢 买入 {abs(diff_val):,.0f}"
+                        elif diff_pct < -0.03:
+                            action = f"🔴 卖出 {abs(diff_val):,.0f}"
+                
+                rebal_data.append({
+                    "Ticker": tkr,
+                    "Target %": f"{tgt_pct:.0%}",
+                    "Current %": f"{curr_pct:.1%}",
+                    "Current Val": f"{curr_val:,.0f}",
+                    "Diff Val": diff_val, # for sorting/color
+                    "Action": action
+                })
+            
+            df_rebal = pd.DataFrame(rebal_data)
+            
+            # Display Table
+            st.markdown("### 📋 调仓建议 (Rebalancing Plan)")
+            st.dataframe(
+                df_rebal,
+                column_config={
+                    "Ticker": "标的",
+                    "Target %": "目标仓位",
+                    "Current %": "当前仓位",
+                    "Current Val": "当前市值",
+                    "Action": "建议操作 (市值)"
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+
+
+            # 5. Charts (Visual Context)
+            with st.expander("📉 查看详细图表 (Visual Context)", expanded=False):
+                # Simple Plotly charts for signals
+                fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=("IWY Price & MA200", "VIX", "TNX Yield"))
+                
+                # IWY
+                fig.add_trace(go.Scatter(x=data.index, y=data['IWY'], name='IWY'), row=1, col=1)
+                iwy_ma = data['IWY'].rolling(200).mean()
+                fig.add_trace(go.Scatter(x=data.index, y=iwy_ma, name='MA200'), row=1, col=1)
+                
+                # VIX
+                fig.add_trace(go.Scatter(x=data.index, y=data['^VIX'], name='VIX', line=dict(color='purple')), row=2, col=1)
+                fig.add_hline(y=32, line_dash='dash', line_color='red', annotation_text='Panic (32)', row=2, col=1)
+                
+                # TNX
+                fig.add_trace(go.Scatter(x=data.index, y=data['^TNX'], name='TNX', line=dict(color='orange')), row=3, col=1)
+                
+                fig.update_layout(height=800, template="plotly_white", hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
+
+    # --- New Independent Historical Backtest Section ---
+    st.markdown("---")
+    st.markdown("### 🕰️ 历史状态回溯与策略仿真 (Historical State & Strategy Backtest)")
+    st.caption("基于历史宏观状态，模拟策略的动态资产配置表现，并与基准进行对比。")
+    
+    col_hist_1, col_hist_2, col_hist_3 = st.columns([2, 1, 1])
+    with col_hist_1:
+        # Default to last 5 years
+        default_start = datetime.date.today() - datetime.timedelta(days=365*5)
+        default_end = datetime.date.today()
+        
+        hist_dates = st.date_input(
+            "选择回测时间范围",
+            value=(default_start, default_end),
+            max_value=datetime.date.today()
+        )
+    with col_hist_2:
+        init_cap_hist = st.number_input("初始资金 ($)", value=10000, step=1000)
+    with col_hist_3:
+        st.write("") # Spacer
+        st.write("") 
+        run_hist_btn = st.button("🚀 运行策略回测", type="primary")
+
+    if run_hist_btn:
+        if isinstance(hist_dates, tuple) and len(hist_dates) == 2:
+            h_start, h_end = hist_dates
+            
+            with st.spinner(f"正在获取历史数据并进行模拟 ({h_start} 至 {h_end})..."):
+                # 1. Get Macro States
+                df_states, err_msg = get_historical_macro_data(h_start, h_end)
+                
+                if not df_states.empty:
+                    # 2. Run Backtest
+                    df_res, bt_err = run_dynamic_backtest(df_states, h_start, h_end, init_cap_hist)
+                    
+                    if df_res is not None:
+                        st.success("回测完成!")
+                        
+                        # --- Metrics Calculation ---
+                        metrics_list = []
+                        for col in df_res.columns:
+                            s = df_res[col]
+                            if s.empty: continue
+                            
+                            tot_ret = (s.iloc[-1] / s.iloc[0] - 1) * 100
+                            days = (s.index[-1] - s.index[0]).days
+                            cagr = ((s.iloc[-1] / s.iloc[0]) ** (365 / days) - 1) * 100 if days > 0 else 0
+                            
+                            rolling_max = s.cummax()
+                            dd = (s / rolling_max - 1) * 100
+                            max_dd = dd.min()
+                            
+                            daily_ret = s.pct_change().dropna()
+                            vol = daily_ret.std() * np.sqrt(252) * 100
+                            sharpe = (daily_ret.mean() / daily_ret.std()) * np.sqrt(252) if daily_ret.std() > 0 else 0
+                            
+                            metrics_list.append({
+                                "Strategy": col,
+                                "Total Return": tot_ret,
+                                "CAGR": cagr,
+                                "Max Drawdown": max_dd,
+                                "Volatility": vol,
+                                "Sharpe": sharpe
+                            })
+                            
+                        st.dataframe(
+                            pd.DataFrame(metrics_list).set_index("Strategy"),
+                            use_container_width=True,
+                            column_config={
+                                "Total Return": st.column_config.NumberColumn(format="%.2f%%"),
+                                "CAGR": st.column_config.NumberColumn(format="%.2f%%"),
+                                "Max Drawdown": st.column_config.NumberColumn(format="%.2f%%"),
+                                "Volatility": st.column_config.NumberColumn(format="%.2f%%"),
+                                "Sharpe": st.column_config.NumberColumn(format="%.2f")
+                            }
+                        )
+                        
+                        # --- Charts ---
+                        tab_b1, tab_b2 = st.tabs(["📈 净值曲线 (Equity Curve)", "📉 回撤 (Drawdown)"])
+                        
+                        with tab_b1:
+                            fig_bt = go.Figure()
+                            colors = {'Dynamic Strategy': '#2962FF', 'IWY (Benchmark)': '#FF6D00', '60/40 (Balanced)': '#00C853', 'Neutral (Fixed)': '#AA00FF'}
+                            
+                            for col in df_res.columns:
+                                width = 3 if col == "Dynamic Strategy" else 1.5
+                                fig_bt.add_trace(go.Scatter(
+                                    x=df_res.index, y=df_res[col],
+                                    name=col,
+                                    line=dict(width=width, color=colors.get(col, 'gray'))
+                                ))
+                                
+                            fig_bt.update_layout(
+                                title="Strategy vs Benchmarks Performance",
+                                xaxis_title="Date",
+                                yaxis_title="Portfolio Value ($)",
+                                height=600,
+                                template="plotly_white",
+                                hovermode="x unified"
+                            )
+                            st.plotly_chart(fig_bt, use_container_width=True)
+                            
+                        with tab_b2:
+                            fig_dd = go.Figure()
+                            for col in df_res.columns:
+                                s = df_res[col]
+                                dd = (s / s.cummax() - 1) * 100
+                                fig_dd.add_trace(go.Scatter(
+                                    x=dd.index, y=dd,
+                                    name=col,
+                                    fill='tozeroy' if col == "Dynamic Strategy" else None
+                                ))
+                            fig_dd.update_layout(title="Drawdown (%)", template="plotly_white", height=500)
+                            st.plotly_chart(fig_dd, use_container_width=True)
+                            
+                    else:
+                        st.error(f"Backtest Failed: {bt_err}")
+                else:
+                    if err_msg:
+                        st.error(err_msg)
+                    else:
+                        st.warning("无有效宏观数据。")
+        else:
+            st.info("请选择完整的日期范围。")
 
 # --- Page 2: Portfolio Backtest ---
 
