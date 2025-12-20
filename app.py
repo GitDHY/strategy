@@ -199,10 +199,17 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
     else:
         cagr = 0.0
 
-    # 2. Drawdown
+    # 2. Drawdown & Duration (Updated)
     rolling_max = series.cummax()
     drawdown = (series / rolling_max - 1) * 100
     max_dd = drawdown.min()
+
+    # Calculate Max Drawdown Duration (Days Underwater)
+    # Logic: Find peaks, fill dates forward, subtract current date from last peak date
+    is_peak = series == rolling_max
+    peak_dates = pd.Series(series.index, index=series.index).where(is_peak).ffill()
+    dd_days = series.index - peak_dates
+    max_dd_days = dd_days.max().days if not dd_days.empty else 0
     
     # 3. Daily Returns Analysis
     daily_ret = series.pct_change().fillna(0)
@@ -224,11 +231,11 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
     if len(downside_ret) > 0:
         downside_std = downside_ret.std() * np.sqrt(252)
         if downside_std > 0:
-            sortino = (excess_ret.mean() * 252) / downside_std # Annualized excess return / Annualized downside deviation
+            sortino = (excess_ret.mean() * 252) / downside_std 
         else:
             sortino = 0.0
     else:
-        sortino = 0.0 # No downside
+        sortino = 0.0 
         
     # Calmar
     if abs(max_dd) > 0:
@@ -236,24 +243,36 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
     else:
         calmar = 0.0
         
-    # 6. Trade/Win Analysis (Daily Basis)
-    # Win Rate: % of days with positive return
+    # 6. Trade/Win Analysis
     winning_days = daily_ret[daily_ret > 0].count()
     losing_days = daily_ret[daily_ret < 0].count()
     total_trading_days = winning_days + losing_days
     
     win_rate = (winning_days / total_trading_days * 100) if total_trading_days > 0 else 0.0
     
-    # Profit/Loss Ratio: Avg Win / Avg Loss
     avg_win = daily_ret[daily_ret > 0].mean() if winning_days > 0 else 0
     avg_loss = abs(daily_ret[daily_ret < 0].mean()) if losing_days > 0 else 0
     
     pl_ratio = (avg_win / avg_loss) if avg_loss > 0 else 0.0
+
+    # 7. Annual Returns (New)
+    annual_rets = {}
+    yearly_vals = series.groupby(series.index.year).last()
+    previous_val = series.iloc[0]
     
-    return {
+    for year in yearly_vals.index:
+        current_val = yearly_vals.loc[year]
+        # Return for the year = (End Value / Start Value) - 1
+        ret = (current_val / previous_val) - 1
+        annual_rets[f"{year} (%)"] = ret * 100
+        previous_val = current_val
+
+    # Construct Final Result
+    results = {
         "Total Return (%)": total_return,
         "CAGR (%)": cagr,
         "Max Drawdown (%)": max_dd,
+        "Max DD Days": max_dd_days, # 新增字段
         "Volatility (%)": vol,
         "Sharpe Ratio": sharpe,
         "Sortino Ratio": sortino,
@@ -261,6 +280,11 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
         "Win Rate (Daily %)": win_rate,
         "Profit/Loss Ratio": pl_ratio
     }
+    
+    # Merge Annual Returns into results
+    results.update(annual_rets)
+
+    return results
 
 def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0):
     """
@@ -339,6 +363,13 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     s_strategy = pd.Series(portfolio_values, index=df_states.index, name="Strategy")
     
     # 4. Benchmarks
+    # SPY
+    s_spy = pd.Series(dtype=float)
+    if 'SPY' in price_data.columns:
+        spy_prices = price_data['SPY']
+        s_spy = (spy_prices / spy_prices.iloc[0]) * initial_capital
+        s_spy.name = "SPY (Benchmark)"
+
     # IWY
     s_iwy = pd.Series(dtype=float)
     if 'IWY' in price_data.columns:
@@ -373,6 +404,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     
     return pd.DataFrame({
         "Dynamic Strategy": s_strategy,
+        "SPY (Benchmark)": s_spy,
         "IWY (Benchmark)": s_iwy,
         "60/40 (Balanced)": s_6040,
         "Neutral (Fixed)": s_neutral
@@ -875,21 +907,32 @@ def render_historical_backtest_section():
                         metrics_list.append(row)
                     
                     st.markdown("#### 📊 详细性能指标 (Performance Metrics)")
+                    df_metrics = pd.DataFrame(metrics_list)
+                    
+                    # Basic Configs
+                    col_config = {
+                        "Strategy": st.column_config.TextColumn("策略名称", width="medium"),
+                        "Total Return (%)": st.column_config.NumberColumn("总收益率", format="%.2f%%"),
+                        "CAGR (%)": st.column_config.NumberColumn("年化收益 (CAGR)", format="%.2f%%"),
+                        "Max Drawdown (%)": st.column_config.NumberColumn("最大回撤", format="%.2f%%"),
+                        "Max DD Days": st.column_config.NumberColumn("回撤修复 (天)", format="%d"),
+                        "Volatility (%)": st.column_config.NumberColumn("波动率", format="%.2f%%"),
+                        "Sharpe Ratio": st.column_config.NumberColumn("夏普比率", format="%.2f"),
+                        "Sortino Ratio": st.column_config.NumberColumn("索提诺", format="%.2f"),
+                        "Calmar Ratio": st.column_config.NumberColumn("卡玛", format="%.2f"),
+                        "Win Rate (Daily %)": st.column_config.NumberColumn("胜率", format="%.1f%%"),
+                        "Profit/Loss Ratio": st.column_config.NumberColumn("盈亏比", format="%.2f"),
+                    }
+                    
+                    # Add dynamic configs for Years
+                    for c in df_metrics.columns:
+                        if " (%)" in c and c not in col_config:
+                            col_config[c] = st.column_config.NumberColumn(c, format="%.2f%%")
+                            
                     st.dataframe(
-                        pd.DataFrame(metrics_list), 
+                        df_metrics, 
                         use_container_width=True,
-                        column_config={
-                            "Strategy": st.column_config.TextColumn("策略名称", width="medium"),
-                            "Total Return (%)": st.column_config.NumberColumn("总收益率", format="%.2f%%"),
-                            "CAGR (%)": st.column_config.NumberColumn("年化收益 (CAGR)", format="%.2f%%"),
-                            "Max Drawdown (%)": st.column_config.NumberColumn("最大回撤", format="%.2f%%"),
-                            "Volatility (%)": st.column_config.NumberColumn("波动率 (年化)", format="%.2f%%"),
-                            "Sharpe Ratio": st.column_config.NumberColumn("夏普比率 (Sharpe)", format="%.2f"),
-                            "Sortino Ratio": st.column_config.NumberColumn("索提诺比率 (Sortino)", format="%.2f"),
-                            "Calmar Ratio": st.column_config.NumberColumn("卡玛比率 (Calmar)", format="%.2f"),
-                            "Win Rate (Daily %)": st.column_config.NumberColumn("胜率 (日度)", format="%.1f%%"),
-                            "Profit/Loss Ratio": st.column_config.NumberColumn("盈亏比 (P/L)", format="%.2f"),
-                        },
+                        column_config=col_config,
                         hide_index=True
                     )
                     
