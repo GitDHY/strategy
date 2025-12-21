@@ -11,6 +11,12 @@ import io
 
 import datetime
 
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import threading
+import time
+
 # Set page config must be the first streamlit command
 st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer")
 
@@ -109,6 +115,199 @@ def delete_portfolio(name):
         del data[name]
         with open(PORTFOLIO_FILE, "w") as f:
             json.dump(data, f, indent=4)
+
+# --- Alert & Automation Config ---
+ALERT_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "alert_config.json")
+
+def load_alert_config():
+    if not os.path.exists(ALERT_CONFIG_FILE):
+        return {
+            "enabled": False,
+            "email_to": "",
+            "email_from": "",
+            "email_pwd": "",
+            "smtp_server": "smtp.gmail.com",
+            "smtp_port": 587,
+            "frequency": "Manual", # Manual, Daily, Weekly
+            "trigger_time": "09:00",
+            "last_run": ""
+        }
+    try:
+        with open(ALERT_CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_alert_config(config):
+    with open(ALERT_CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=4)
+
+def analyze_market_state_logic():
+    """
+    Core logic to fetch data and determine current market state.
+    Returns: (success, result_dict_or_error_msg)
+    """
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=365*3)
+    
+    # Re-use the robust fetcher
+    df_hist, err = get_historical_macro_data(start, end)
+    
+    if df_hist.empty:
+        return False, err
+    
+    # Extract latest state
+    last_row = df_hist.iloc[-1]
+    state = last_row['State']
+    
+    # Logic helpers
+    yc_series = df_hist['YieldCurve']
+    yc_un_invert = False
+    if len(yc_series) > 126:
+        recent_min = yc_series.iloc[-126:].min()
+        current_yc = yc_series.iloc[-1]
+        yc_un_invert = (current_yc < 0.2) and (recent_min < -0.2)
+
+    metrics = {
+        'date': last_row.name.strftime('%Y-%m-%d'),
+        'state': state,
+        'tnx_roc': last_row['RateShock'],
+        'rate_shock': last_row['RateShock'] > 0.20,
+        'sahm': last_row['Sahm'],
+        'recession': last_row['Sahm'] >= 0.50,
+        'corr': last_row['Corr'],
+        'corr_broken': last_row['Corr'] > 0.30,
+        'vix': last_row['VIX'],
+        'fear': last_row['VIX'] > 32,
+        'yield_curve': last_row['YieldCurve'],
+        'yc_un_invert': yc_un_invert,
+        'gold_bear': last_row['Gold_Bear'],
+        'value_regime': last_row['Value_Regime']
+    }
+    
+    return True, metrics
+
+def send_strategy_email(metrics, config):
+    """Sends an email with the strategy analysis."""
+    if not config.get("email_to") or not config.get("email_from"):
+        return False, "邮箱配置不完整"
+
+    state = metrics['state']
+    s_conf = MACRO_STATES.get(state, MACRO_STATES["NEUTRAL"])
+    
+    # Calculate Targets
+    targets = get_target_percentages(state, gold_bear=metrics['gold_bear'], value_regime=metrics['value_regime'])
+    
+    # Build HTML Body
+    target_rows = ""
+    for t, w in targets.items():
+        if w > 0:
+            target_rows += f"<tr><td>{ASSET_NAMES.get(t, t)}</td><td>{t}</td><td><b>{w*100:.1f}%</b></td></tr>"
+
+    html_content = f"""
+    <html>
+    <body>
+        <h2>📊 宏观策略日报 (Macro Strategy Alert)</h2>
+        <p><b>日期:</b> {metrics['date']}</p>
+        
+        <div style="padding: 15px; background-color: {s_conf['bg_color']}; border-left: 5px solid {s_conf['border_color']};">
+            <h3 style="margin-top:0;">当前状态: {s_conf['icon']} {s_conf['display']}</h3>
+            <p>{s_conf['desc']}</p>
+        </div>
+        
+        <h3>📈 核心指标 (Key Metrics)</h3>
+        <ul>
+            <li><b>利率冲击 (Rate Shock):</b> {metrics['tnx_roc']:.1%} ({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</li>
+            <li><b>衰退信号 (Sahm Rule):</b> {metrics['sahm']:.2f} ({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</li>
+            <li><b>恐慌指数 (VIX):</b> {metrics['vix']:.1f}</li>
+            <li><b>股债相关性 (Corr):</b> {metrics['corr']:.2f}</li>
+            <li><b>黄金趋势:</b> {'🐻 Bearish' if metrics['gold_bear'] else '🐂 Bullish'}</li>
+        </ul>
+        
+        <h3>🎯 建议配置 (Target Allocation)</h3>
+        <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
+            <tr style="background-color: #f2f2f2;"><th>资产名称</th><th>代码</th><th>目标仓位</th></tr>
+            {target_rows}
+        </table>
+        
+        <p style="font-size: small; color: gray; margin-top: 20px;">
+            此邮件由 Stock Strategy Analyzer 自动生成。<br>
+            投资有风险，决策需谨慎。
+        </p>
+    </body>
+    </html>
+    """
+    
+    msg = MIMEMultipart()
+    msg['From'] = config['email_from']
+    msg['To'] = config['email_to']
+    msg['Subject'] = f"[{state}] 宏观策略状态更新 - {metrics['date']}"
+    msg.attach(MIMEText(html_content, 'html'))
+    
+    try:
+        server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
+        server.starttls()
+        server.login(config['email_from'], config['email_pwd'])
+        server.send_message(msg)
+        server.quit()
+        return True, "邮件发送成功"
+    except Exception as e:
+        return False, f"邮件发送失败: {str(e)}"
+
+# --- Background Scheduler (Lightweight) ---
+if 'scheduler_started' not in st.session_state:
+    st.session_state['scheduler_started'] = False
+
+def run_scheduler_check():
+    """Checks if alert needs to be sent. Runs in background thread."""
+    while True:
+        cfg = load_alert_config()
+        if cfg.get("enabled", False) and cfg.get("frequency") != "Manual":
+            now = datetime.datetime.now()
+            trigger_hm = cfg.get("trigger_time", "09:00")
+            last_run_str = cfg.get("last_run", "")
+            
+            should_run = False
+            today_str = now.strftime('%Y-%m-%d')
+            
+            # Simple check: Is it past trigger time AND haven't run today?
+            trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M")
+            
+            if now >= trigger_dt:
+                # Check frequency
+                if cfg["frequency"] == "Daily":
+                    if last_run_str != today_str:
+                        should_run = True
+                elif cfg["frequency"] == "Weekly":
+                    # Assume Monday is trigger day
+                    if now.weekday() == 0 and last_run_str != today_str:
+                        should_run = True
+            
+            if should_run:
+                print(f"[Scheduler] Triggering auto-analysis at {now}")
+                success, res = analyze_market_state_logic()
+                if success:
+                    email_ok, msg = send_strategy_email(res, cfg)
+                    if email_ok:
+                        print(f"[Scheduler] Email sent: {msg}")
+                        cfg["last_run"] = today_str
+                        save_alert_config(cfg)
+                    else:
+                        print(f"[Scheduler] Email failed: {msg}")
+                else:
+                    print(f"[Scheduler] Analysis failed: {res}")
+        
+        time.sleep(60) # Check every minute
+
+def start_background_thread():
+    if not st.session_state['scheduler_started']:
+        t = threading.Thread(target=run_scheduler_check, daemon=True)
+        t.start()
+        st.session_state['scheduler_started'] = True
+        print("[System] Background scheduler thread started.")
+
+# Start scheduler on import/run
+start_background_thread()
 
 # --- Shared Logic for Backtest & State Machine ---
 
@@ -939,67 +1138,104 @@ def render_historical_backtest_section():
             else:
                 st.error(f"无法获取数据: {err}")
 
+def render_alert_config_ui():
+    """Renders the configuration UI for auto-alerts."""
+    with st.expander("🔔 自动提醒设置 (Auto-Alert Configuration)", expanded=False):
+        st.caption("设置定时自动分析市场状态，并将策略建议发送到您的邮箱。需保持后台脚本运行或网页开启。")
+        
+        config = load_alert_config()
+        
+        with st.form("alert_config_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("📧 邮件配置 (Email)")
+                email_to = st.text_input("接收邮箱 (To)", value=config.get("email_to", ""), placeholder="you@example.com")
+                email_from = st.text_input("发送邮箱 (From)", value=config.get("email_from", ""), placeholder="sender@gmail.com")
+                email_pwd = st.text_input("授权码/密码 (App Password)", value=config.get("email_pwd", ""), type="password", help="对于 Gmail/Outlook，请使用生成的应用专用密码 (App Password)")
+                
+                c1a, c1b = st.columns(2)
+                with c1a:
+                    smtp_server = st.text_input("SMTP 服务器", value=config.get("smtp_server", "smtp.gmail.com"))
+                with c1b:
+                    smtp_port = st.number_input("SMTP 端口", value=config.get("smtp_port", 587))
+            
+            with c2:
+                st.subheader("⏰ 触发规则 (Trigger)")
+                enabled = st.checkbox("启用自动提醒 (Enable)", value=config.get("enabled", False))
+                frequency = st.selectbox("触发频率", ["Manual", "Daily", "Weekly"], index=["Manual", "Daily", "Weekly"].index(config.get("frequency", "Manual")))
+                trigger_time = st.time_input("触发时间 (Local Time)", value=datetime.datetime.strptime(config.get("trigger_time", "09:00"), "%H:%M").time())
+                
+                st.info(f"上次运行: {config.get('last_run', 'Never')}")
+                st.markdown("""
+                **注意**: 
+                1. 只有当应用在运行状态 (网页开启或后台脚本运行) 时才会触发。
+                2. 建议设置为每日开盘前 (如 09:00)。
+                """)
+
+            if st.form_submit_button("💾 保存配置"):
+                new_config = {
+                    "enabled": enabled,
+                    "email_to": email_to,
+                    "email_from": email_from,
+                    "email_pwd": email_pwd,
+                    "smtp_server": smtp_server,
+                    "smtp_port": smtp_port,
+                    "frequency": frequency,
+                    "trigger_time": trigger_time.strftime("%H:%M"),
+                    "last_run": config.get("last_run", "")
+                }
+                save_alert_config(new_config)
+                st.success("配置已保存!")
+                st.rerun()
+
+        # Test Button
+        if st.button("📨 立即发送测试邮件 (Send Test Email)", type="secondary"):
+            with st.spinner("正在分析并发送..."):
+                cfg = load_alert_config()
+                success, res = analyze_market_state_logic()
+                if success:
+                    ok, msg = send_strategy_email(res, cfg)
+                    if ok:
+                        st.success(f"✅ 发送成功! 请检查邮箱: {cfg['email_to']}")
+                    else:
+                        st.error(f"❌ 发送失败: {msg}")
+                else:
+                    st.error(f"❌ 分析失败: {res}")
+
 def render_state_machine_check():
     st.header("🛡️ 宏观状态机与资产配置 (Macro State & Allocation)")
     st.caption("全自动资产配置生成器 (Auto-Allocator)")
     
+    # 1. Alert Config
+    render_alert_config_ui()
+    
+    # 2. Imports & Inputs
     render_manual_data_import()
     render_reference_guide()
     render_portfolio_import()
     current_holdings, total_value = render_holdings_input()
     
+    # 3. Manual Analysis
     if st.button("🚀 开始诊断 (Run Analysis)", type="primary", use_container_width=True):
         with st.status("正在进行宏观扫描...", expanded=True) as status:
-            st.write("📡 获取数据...")
-            # Use get_historical_macro_data for "Now" by asking for recent window
-            end = datetime.date.today()
-            start = end - datetime.timedelta(days=365*3)
+            st.write("📡 获取数据并计算指标...")
             
-            # Re-use the robust fetcher
-            df_hist, err = get_historical_macro_data(start, end)
+            # Use the new shared logic
+            success, metrics = analyze_market_state_logic()
             
-            if df_hist.empty:
+            if not success:
                 status.update(label="诊断失败", state="error")
-                st.error(err)
+                st.error(metrics) # metrics is error msg here
             else:
                 st.write("✅ 数据获取与计算完成")
                 status.update(label="诊断完成", state="complete", expanded=False)
                 
-                # Extract latest state
-                last_row = df_hist.iloc[-1]
-                state = last_row['State']
-                
-                # Logic helpers for dashboard
-                # Calculate Yield Curve Un-inversion signal (Steepening from deep inversion)
-                yc_series = df_hist['YieldCurve']
-                yc_un_invert = False
-                if len(yc_series) > 126:
-                    recent_min = yc_series.iloc[-126:].min()
-                    current_yc = yc_series.iloc[-1]
-                    # Logic: Was deeply inverted (<-0.2) recently, now rising but still low (<0.2)
-                    yc_un_invert = (current_yc < 0.2) and (recent_min < -0.2)
-
-                metrics = {
-                    'tnx_roc': last_row['RateShock'],
-                    'rate_shock': last_row['RateShock'] > 0.20,
-                    'sahm': last_row['Sahm'],
-                    'recession': last_row['Sahm'] >= 0.50,
-                    'corr': last_row['Corr'],
-                    'corr_broken': last_row['Corr'] > 0.30,
-                    'vix': last_row['VIX'],
-                    'fear': last_row['VIX'] > 32,
-                    'yield_curve': last_row['YieldCurve'],
-                    'yc_un_invert': yc_un_invert,
-                    'gold_bear': last_row['Gold_Bear'],
-                    'value_regime': last_row['Value_Regime']
-                }
-                
                 # Render Results
-                render_status_card(state)
+                render_status_card(metrics['state'])
                 render_factor_dashboard(metrics)
                 
                 st.markdown("---")
-                render_rebalancing_table(state, current_holdings, total_value, metrics['gold_bear'], metrics['value_regime'])
+                render_rebalancing_table(metrics['state'], current_holdings, total_value, metrics['gold_bear'], metrics['value_regime'])
                 
     render_historical_backtest_section()
 
