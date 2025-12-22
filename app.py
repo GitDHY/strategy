@@ -160,6 +160,53 @@ def analyze_market_state_logic():
     last_row = df_hist.iloc[-1]
     state = last_row['State']
     
+    # --- Fetch Portfolio Asset Trends (Dual Momentum) ---
+    asset_trends = {}
+    try:
+        check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI', 'IWY']
+        trend_start = datetime.date.today() - datetime.timedelta(days=400)
+        # Fetch latest data
+        data_raw = yf.download(check_assets, start=trend_start, progress=False, auto_adjust=False)
+        
+        df_assets = pd.DataFrame()
+        if not data_raw.empty:
+            # Handle MultiIndex or Flat
+            if isinstance(data_raw.columns, pd.MultiIndex):
+                if 'Adj Close' in data_raw.columns.get_level_values(0):
+                    df_assets = data_raw['Adj Close']
+                elif 'Close' in data_raw.columns.get_level_values(0):
+                    df_assets = data_raw['Close']
+                else:
+                    df_assets = data_raw
+            elif 'Adj Close' in data_raw.columns:
+                 df_assets = data_raw['Adj Close']
+            elif 'Close' in data_raw.columns:
+                 df_assets = data_raw['Close']
+            else:
+                 df_assets = data_raw
+
+        if not df_assets.empty:
+            df_assets = df_assets.ffill()
+            ma200 = df_assets.rolling(200).mean()
+            
+            latest_prices = df_assets.iloc[-1]
+            latest_ma = ma200.iloc[-1]
+            
+            for t in check_assets:
+                if t in df_assets.columns:
+                    # Bearish if Price < MA200
+                    try:
+                        p = latest_prices[t]
+                        m = latest_ma[t]
+                        if pd.notna(p) and pd.notna(m):
+                            asset_trends[t] = bool(p < m)
+                        else:
+                            asset_trends[t] = False
+                    except:
+                        asset_trends[t] = False
+    except Exception as e:
+        print(f"Error fetching asset trends: {e}")
+
     # Logic helpers
     yc_series = df_hist['YieldCurve']
     yc_un_invert = False
@@ -182,7 +229,8 @@ def analyze_market_state_logic():
         'yield_curve': last_row['YieldCurve'],
         'yc_un_invert': yc_un_invert,
         'gold_bear': last_row['Gold_Bear'],
-        'value_regime': last_row['Value_Regime']
+        'value_regime': last_row['Value_Regime'],
+        'asset_trends': asset_trends
     }
     
     return True, metrics
@@ -196,7 +244,7 @@ def send_strategy_email(metrics, config):
     s_conf = MACRO_STATES.get(state, MACRO_STATES["NEUTRAL"])
     
     # Calculate Targets
-    targets = get_target_percentages(state, gold_bear=metrics['gold_bear'], value_regime=metrics['value_regime'])
+    targets = get_target_percentages(state, gold_bear=metrics['gold_bear'], value_regime=metrics['value_regime'], asset_trends=metrics.get('asset_trends', {}))
     
     # Build HTML Body
     target_rows = ""
@@ -311,11 +359,15 @@ start_background_thread()
 
 # --- Shared Logic for Backtest & State Machine ---
 
-def get_target_percentages(s, gold_bear=False, value_regime=False):
+def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None):
     """
     Returns target asset allocation based on macro state.
     Shared by State Machine Diagnosis and Backtest.
+    asset_trends: dict {ticker: is_bearish_bool} - optional override for asset specific trends
     """
+    if asset_trends is None:
+        asset_trends = {}
+
     targets = {}
     
     if s == "INFLATION_SHOCK":
@@ -372,6 +424,32 @@ def get_target_percentages(s, gold_bear=False, value_regime=False):
             'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
+
+        # --- Enhanced Momentum Filter (Dual Momentum) ---
+        # Even in NEUTRAL, if specific assets are in a downtrend (Price < MA200),
+        # cut their allocation and move capital to IWY (if strong) or WTMF (Defense).
+        
+        # Assets to check for momentum
+        mom_check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI']
+        
+        for asset in mom_check_assets:
+            if asset_trends.get(asset, False): # If Asset is Bearish
+                if asset in targets and targets[asset] > 0:
+                    weight_to_move = targets[asset]
+                    targets[asset] = 0.0
+                    
+                    # Reallocate
+                    # If IWY is NOT bearish (based on asset_trends or macro Trend_Bear), move to IWY
+                    # But get_target_percentages doesn't know macro Trend_Bear explicitly here easily unless passed.
+                    # However, NEUTRAL implies IWY is generally OK (otherwise CAUTIOUS_TREND).
+                    # We can check asset_trends['IWY'] if available.
+                    
+                    if asset_trends.get('IWY', False):
+                        # IWY is also weak? Move to WTMF (Cash Proxy)
+                        targets['WTMF'] += weight_to_move
+                    else:
+                        # IWY is strong/neutral -> Add to Growth
+                        targets['IWY'] += weight_to_move
         
     # Gold Trend Filter: If Gold is Bearish, cut allocation by half, move to WTMF (Cash proxy)
     if gold_bear and targets.get('GSD.SI', 0) > 0:
@@ -494,7 +572,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     assets = ['IWY', 'WTMF', 'LVHI', 'G3B.SI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI', 'TLT', 'SPY']
     
     # 2. Fetch Price Data
-    fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=7)
+    fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=365)
     
     try:
         price_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)['Adj Close']
@@ -511,14 +589,22 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     # Fill missing
     price_data = price_data.ffill().bfill()
     
+    # Calculate Asset Trends for Backtest (Dual Momentum)
+    ma200_all = price_data.rolling(200).mean()
+    trend_bear_all = price_data < ma200_all
+    
     # Filter to requested range
-    price_data = price_data[(price_data.index >= pd.to_datetime(start_date)) & (price_data.index <= pd.to_datetime(end_date))]
+    mask = (price_data.index >= pd.to_datetime(start_date)) & (price_data.index <= pd.to_datetime(end_date))
+    price_data = price_data[mask]
+    trend_bear_all = trend_bear_all[mask]
+    
     if price_data.empty:
          return None, None, "Price data empty after filtering."
 
     # Align states with prices
     common_idx = price_data.index.intersection(df_states.index)
     price_data = price_data.loc[common_idx]
+    trend_bear_all = trend_bear_all.loc[common_idx]
     df_states = df_states.loc[common_idx]
     
     if len(price_data) < 10:
@@ -545,7 +631,12 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         gb = row['Gold_Bear']
         vr = row['Value_Regime']
         
-        targets = get_target_percentages(s, gold_bear=gb, value_regime=vr)
+        # Get trends for this date
+        daily_trends = {}
+        if date in trend_bear_all.index:
+            daily_trends = trend_bear_all.loc[date].to_dict()
+        
+        targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends)
         
         # Record history
         rec = targets.copy()
@@ -1037,9 +1128,10 @@ def render_factor_dashboard(metrics):
         vr = metrics['value_regime']
         st.metric("风格轮动", "Value Regime" if vr else "Growth Regime", "Tilt Value" if vr else "Tilt Growth", delta_color="off")
 
-def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime):
+def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None):
     """Renders the rebalancing table."""
-    targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime)
+    if asset_trends is None: asset_trends = {}
+    targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime, asset_trends=asset_trends)
     
     # Add Current Holdings not in targets
     all_tickers = set(targets.keys()).union(current_holdings.keys())
@@ -1400,7 +1492,7 @@ def render_state_machine_check():
                 render_factor_dashboard(metrics)
                 
                 st.markdown("---")
-                render_rebalancing_table(metrics['state'], current_holdings, total_value, metrics['gold_bear'], metrics['value_regime'])
+                render_rebalancing_table(metrics['state'], current_holdings, total_value, metrics['gold_bear'], metrics['value_regime'], metrics.get('asset_trends', {}))
                 
     render_historical_backtest_section()
 
