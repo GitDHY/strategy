@@ -503,18 +503,18 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         try:
              price_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)['Close']
         except Exception as e:
-            return None, f"Data fetch failed: {e}"
+            return None, None, f"Data fetch failed: {e}"
 
     if price_data.empty:
-         return None, "No price data fetched."
+         return None, None, "No price data fetched."
 
     # Fill missing
-    price_data = price_data.fillna(method='ffill').fillna(method='bfill')
+    price_data = price_data.ffill().bfill()
     
     # Filter to requested range
     price_data = price_data[(price_data.index >= pd.to_datetime(start_date)) & (price_data.index <= pd.to_datetime(end_date))]
     if price_data.empty:
-         return None, "Price data empty after filtering."
+         return None, None, "Price data empty after filtering."
 
     # Align states with prices
     common_idx = price_data.index.intersection(df_states.index)
@@ -522,11 +522,14 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     df_states = df_states.loc[common_idx]
     
     if len(price_data) < 10:
-        return None, "Insufficient data points for backtest."
+        return None, None, "Insufficient data points for backtest."
 
     # 3. Strategy Simulation (Daily Rebalancing Approximation)
     portfolio_values = []
     current_val = initial_capital
+    
+    # Track allocation history
+    history_records = []
     
     # We iterate daily. To speed up, we could vectorise, but logic is complex.
     # Logic: Daily return = Sum(Weight_i * Return_i)
@@ -544,6 +547,12 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         
         targets = get_target_percentages(s, gold_bear=gb, value_regime=vr)
         
+        # Record history
+        rec = targets.copy()
+        rec['Date'] = date
+        rec['State'] = s
+        history_records.append(rec)
+        
         # Calculate Portfolio Return for this day
         # If we rebalanced yesterday to these weights?
         # Simpler: Assume we hold these weights TODAY.
@@ -560,6 +569,11 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         portfolio_values.append(current_val)
         
     s_strategy = pd.Series(portfolio_values, index=df_states.index, name="Strategy")
+    
+    # Create History DataFrame
+    df_history = pd.DataFrame(history_records)
+    if not df_history.empty:
+        df_history = df_history.set_index('Date')
     
     # 4. Benchmarks
     # SPY
@@ -607,7 +621,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         "IWY (Benchmark)": s_iwy,
         "60/40 (Balanced)": s_6040,
         "Neutral (Fixed)": s_neutral
-    }), None
+    }), df_history, None
 
 
 
@@ -730,12 +744,12 @@ def get_historical_macro_data(start_date, end_date):
         unrate.columns = ['UNRATE']
         unrate = unrate[unrate.index >= fetch_start]
         # Reindex
-        unrate_daily = unrate.reindex(data.index, method='ffill')
+        unrate_daily = unrate.reindex(data.index).ffill()
         
         if not yc.empty:
             yc.columns = ['T10Y2Y']
             yc = yc[yc.index >= fetch_start]
-            yc_daily = yc.reindex(data.index, method='ffill')
+            yc_daily = yc.reindex(data.index).ffill()
         else:
             yc_daily = pd.DataFrame(0.0, index=data.index, columns=['T10Y2Y'])
 
@@ -749,7 +763,7 @@ def get_historical_macro_data(start_date, end_date):
         u_3m_avg = u_monthly.rolling(window=3).mean()
         u_12m_low = u_3m_avg.rolling(window=12).min().shift(1)
         sahm_monthly = u_3m_avg - u_12m_low
-        sahm_series = sahm_monthly.reindex(data.index, method='ffill')
+        sahm_series = sahm_monthly.reindex(data.index).ffill()
         
         # Rate Shock
         tnx_col = '^TNX' if '^TNX' in data.columns else data.columns[0]
@@ -880,18 +894,37 @@ def render_reference_guide():
     """Renders the state reference guide."""
     with st.expander("📖 新手指南：市场状态与应对策略 (Beginner's Guide)", expanded=False):
         st.info("💡 **系统逻辑**：自动分析宏观数据，判断当前“经济季节”，并建议“穿什么衣服”（资产配置）。")
-        cols = st.columns(5)
-        # Using shared constants
-        states_order = ["INFLATION_SHOCK", "DEFLATION_RECESSION", "EXTREME_ACCUMULATION", "CAUTIOUS_TREND", "NEUTRAL"]
         
-        for i, s_key in enumerate(states_order):
+        # Define order including all 6 states
+        states_order = [
+            "INFLATION_SHOCK", "DEFLATION_RECESSION", "EXTREME_ACCUMULATION", 
+            "CAUTIOUS_TREND", "CAUTIOUS_VOL", "NEUTRAL"
+        ]
+        
+        # Use 3 columns per row for better layout
+        cols1 = st.columns(3)
+        for i in range(3):
+            s_key = states_order[i]
             s = MACRO_STATES[s_key]
-            with cols[i]:
-                # Simple color coding for headers
-                header_colors = {"🔴": "red", "🔵": "blue", "🚀": "violet", "⚠️": "orange", "⚡": "orange", "🟢": "green"}
-                color = header_colors.get(s['icon'], "gray")
-                st.markdown(f":{color}[**{s['display']}**]")
-                st.markdown(s['desc'])
+            with cols1[i]:
+                st.markdown(f"""
+                <div style="padding: 10px; border-radius: 5px; background-color: {s['bg_color']}; border-left: 4px solid {s['border_color']}; margin-bottom: 10px; height: 180px;">
+                    <div style="font-weight: bold; font-size: 15px; margin-bottom: 5px;">{s['display']}</div>
+                    <div style="font-size: 13px; color: #3c4043; line-height: 1.4;">{s['desc']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        cols2 = st.columns(3)
+        for i in range(3):
+            s_key = states_order[i+3]
+            s = MACRO_STATES[s_key]
+            with cols2[i]:
+                st.markdown(f"""
+                <div style="padding: 10px; border-radius: 5px; background-color: {s['bg_color']}; border-left: 4px solid {s['border_color']}; margin-bottom: 10px; height: 180px;">
+                    <div style="font-weight: bold; font-size: 15px; margin-bottom: 5px;">{s['display']}</div>
+                    <div style="font-size: 13px; color: #3c4043; line-height: 1.4;">{s['desc']}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 def render_portfolio_import():
     """Renders the import from saved portfolios section."""
@@ -1077,7 +1110,7 @@ def render_historical_backtest_section():
         with st.spinner("回测中..."):
             df_states, err = get_historical_macro_data(dates[0], dates[1])
             if not df_states.empty:
-                res, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap)
+                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap)
                 if res is not None:
                     # Metrics & Charts (Simplified for brevity as logic exists in run_dynamic_backtest return)
                     st.success("回测完成")
@@ -1086,9 +1119,128 @@ def render_historical_backtest_section():
                     fig = go.Figure()
                     for c in res.columns:
                         fig.add_trace(go.Scatter(x=res.index, y=res[c], name=c))
-                    fig.update_layout(title="净值曲线", template="plotly_white")
+                    
+                    # Add Background Colors for States
+                    shapes_curve = []
+                    annotations_curve = []
+                    
+                    if df_history is not None and not df_history.empty:
+                        # Create a copy to avoid affecting downstream logic
+                        df_viz = df_history.copy()
+                        df_viz['state_grp'] = (df_viz['State'] != df_viz['State'].shift()).cumsum()
+                        
+                        # Group by state segments
+                        state_segments = df_viz.groupby(['state_grp', 'State'])['State'].agg(
+                            ['first', lambda x: x.index[0], lambda x: x.index[-1]]
+                        ).reset_index()
+                        state_segments.columns = ['grp', 'State', 'State_Name', 'Start', 'End']
+                        
+                        for _, seg in state_segments.iterrows():
+                            s_conf = MACRO_STATES.get(seg['State'], MACRO_STATES["NEUTRAL"])
+                            color = s_conf['bg_color']
+                            
+                            # Add shape
+                            shapes_curve.append(dict(
+                                type="rect",
+                                xref="x", yref="paper",
+                                x0=seg['Start'], x1=seg['End'],
+                                y0=0, y1=1,
+                                fillcolor=color,
+                                opacity=0.3,
+                                layer="below",
+                                line_width=0,
+                            ))
+                            
+                            # Add icon label if segment is long enough
+                            if (seg['End'] - seg['Start']).days > 15:
+                                annotations_curve.append(dict(
+                                    x=seg['Start'] + (seg['End'] - seg['Start'])/2,
+                                    y=1.05,
+                                    xref="x", yref="paper",
+                                    text=s_conf['icon'],
+                                    showarrow=False,
+                                    font=dict(size=14)
+                                ))
+
+                    fig.update_layout(
+                        title="净值曲线 (Net Value Curve)", 
+                        template="plotly_white",
+                        shapes=shapes_curve,
+                        annotations=annotations_curve,
+                        hovermode="x unified"
+                    )
                     st.plotly_chart(fig, use_container_width=True)
                     
+                    # --- NEW: State & Allocation Visualization ---
+                    st.markdown("### 🏗️ 仓位历史与状态分布 (Allocation & Regimes)")
+                    
+                    if df_history is not None and not df_history.empty:
+                        # Stacked Area Chart
+                        fig_alloc = go.Figure()
+                        
+                        # Identify asset columns (float types)
+                        asset_cols = df_history.select_dtypes(include=[np.number]).columns
+                        
+                        for asset in asset_cols:
+                            fig_alloc.add_trace(go.Scatter(
+                                x=df_history.index, 
+                                y=df_history[asset],
+                                mode='lines',
+                                name=ASSET_NAMES.get(asset, asset),
+                                stackgroup='one',
+                                groupnorm='percent', # Normalize to 0-100
+                                hoverinfo='x+y+name'
+                            ))
+                        
+                        # Add Background Colors for States
+                        # 1. Simplify states to segments
+                        df_history['state_grp'] = (df_history['State'] != df_history['State'].shift()).cumsum()
+                        state_segments = df_history.groupby(['state_grp', 'State'])['State'].agg(['first', lambda x: x.index[0], lambda x: x.index[-1]]).reset_index()
+                        state_segments.columns = ['grp', 'State', 'State_Name', 'Start', 'End']
+                        
+                        shapes = []
+                        annotations = []
+                        
+                        for _, seg in state_segments.iterrows():
+                            s_conf = MACRO_STATES.get(seg['State'], MACRO_STATES["NEUTRAL"])
+                            color = s_conf['bg_color']
+                            
+                            # Add shape
+                            shapes.append(dict(
+                                type="rect",
+                                xref="x", yref="paper",
+                                x0=seg['Start'], x1=seg['End'],
+                                y0=0, y1=1,
+                                fillcolor=color,
+                                opacity=0.3,
+                                layer="below",
+                                line_width=0,
+                            ))
+                            
+                            # Add label if segment is long enough (e.g. > 10 days)
+                            if (seg['End'] - seg['Start']).days > 15:
+                                annotations.append(dict(
+                                    x=seg['Start'] + (seg['End'] - seg['Start'])/2,
+                                    y=1.05,
+                                    xref="x", yref="paper",
+                                    text=s_conf['icon'],
+                                    showarrow=False,
+                                    font=dict(size=14)
+                                ))
+
+                        fig_alloc.update_layout(
+                            title="历史持仓分布与市场状态 (Portfolio Allocation & Market Regimes)",
+                            template="plotly_white",
+                            yaxis=dict(title="Allocation %", range=[0, 100]),
+                            shapes=shapes,
+                            annotations=annotations,
+                            hovermode="x unified"
+                        )
+                        st.plotly_chart(fig_alloc, use_container_width=True)
+                        
+                        # Legend for states (Optional text below)
+                        st.caption("背景颜色代表市场状态: " + " | ".join([f"{v['icon']} {k}" for k, v in MACRO_STATES.items()]))
+
                     # 2. Drawdown
                     fig_dd = go.Figure()
                     for c in res.columns:
@@ -1155,15 +1307,28 @@ def render_alert_config_ui():
                 
                 c1a, c1b = st.columns(2)
                 with c1a:
-                    smtp_server = st.text_input("SMTP 服务器", value=config.get("smtp_server", "smtp.gmail.com"))
+                    smtp_server = st.text_input("SMTP 服务器", value=str(config.get("smtp_server", "smtp.gmail.com")))
                 with c1b:
-                    smtp_port = st.number_input("SMTP 端口", value=config.get("smtp_port", 587))
+                    val_port = config.get("smtp_port", 587)
+                    try: val_port = int(val_port)
+                    except: val_port = 587
+                    smtp_port = st.number_input("SMTP 端口", value=val_port)
             
             with c2:
                 st.subheader("⏰ 触发规则 (Trigger)")
-                enabled = st.checkbox("启用自动提醒 (Enable)", value=config.get("enabled", False))
-                frequency = st.selectbox("触发频率", ["Manual", "Daily", "Weekly"], index=["Manual", "Daily", "Weekly"].index(config.get("frequency", "Manual")))
-                trigger_time = st.time_input("触发时间 (Local Time)", value=datetime.datetime.strptime(config.get("trigger_time", "09:00"), "%H:%M").time())
+                enabled = st.checkbox("启用自动提醒 (Enable)", value=bool(config.get("enabled", False)))
+                
+                curr_freq = str(config.get("frequency", "Manual"))
+                freq_opts = ["Manual", "Daily", "Weekly"]
+                if curr_freq not in freq_opts: curr_freq = "Manual"
+                frequency = st.selectbox("触发频率", freq_opts, index=freq_opts.index(curr_freq))
+                
+                time_str = str(config.get("trigger_time", "09:00"))
+                try:
+                    time_obj = datetime.datetime.strptime(time_str, "%H:%M").time()
+                except:
+                    time_obj = datetime.time(9, 0)
+                trigger_time = st.time_input("触发时间 (Local Time)", value=time_obj)
                 
                 st.info(f"上次运行: {config.get('last_run', 'Never')}")
                 st.markdown("""
@@ -1476,7 +1641,7 @@ def render_portfolio_backtest():
                     st.error("No data for selected assets.")
                     return
                 
-                data = data.fillna(method='ffill').fillna(method='bfill')
+                data = data.ffill().bfill()
                 normalized_prices = data / data.iloc[0]
 
                 # --- Calculation Helper ---
@@ -1522,24 +1687,12 @@ def render_portfolio_backtest():
                     calmar = cagr / abs(max_dd) if max_dd != 0 else 0
 
                     # Max Drawdown Duration (Longest Recovery Time)
-                    # We can define this as the max duration between a peak and the recovery to that peak
-                    is_in_drawdown = dd < 0
-                    current_duration = 0
-                    max_duration_days = 0
-                    
-                    for is_dd in is_in_drawdown:
-                        if is_dd:
-                            current_duration += 1
-                        else:
-                            # Ended a drawdown period (or was never in one)
-                            # Assuming daily data, approximated by count of trading days
-                            # More precise would be difference in dates, but this is a good approximation for 'trading days'
-                            if current_duration > max_duration_days:
-                                max_duration_days = current_duration
-                            current_duration = 0
-                    # Check if the last period was the longest
-                    if current_duration > max_duration_days:
-                        max_duration_days = current_duration
+                    # Logic: Find peaks, fill dates forward, subtract current date from last peak date
+                    # Uses Calendar Days
+                    is_peak = val_series == rolling_max
+                    peak_dates = pd.Series(val_series.index, index=val_series.index).where(is_peak).ffill()
+                    dd_days = val_series.index - peak_dates
+                    max_duration_days = dd_days.max().days if not dd_days.empty else 0
                     
                     return {
                         "name": p_name,
