@@ -6,6 +6,6 @@
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
     "frequency": "Daily",
-    "trigger_time": "11:30",
+    "trigger_time": "09:30",
     "last_run": "2025-12-23"
 }
