@@ -735,7 +735,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         # Note: Yahoo data for GLD starts 2004. TLT 2002. 
         # For meaningful 1990s backtest, we need Indices.
         # But yfinance index data for 'Total Return' is hard. ^GSPC is price only (no div).
-        assets = ['^GSPC', '^NDX', 'TLT', 'GLD'] # Minimal set
+        assets = ['^GSPC', '^NDX', 'TLT', 'GLD', 'VUSTX', 'GC=F'] # Minimal set
     else:
         assets = ['IWY', 'WTMF', 'LVHI', 'G3B.SI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI', 'TLT', 'SPY']
     
@@ -797,7 +797,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     returns_df = price_data.pct_change().fillna(0)
     
     # Proxy Mapper Function
-    def map_target_to_asset(target_ticker):
+    def map_target_to_asset(target_ticker, current_date=None):
         if not use_proxies:
             return target_ticker
         
@@ -806,8 +806,11 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             if '^NDX' in price_data.columns and target_ticker == 'IWY': return '^NDX'
             return '^GSPC' if '^GSPC' in price_data.columns else target_ticker
         if target_ticker in ['TLT', 'MBH.SI']:
-            return 'TLT' # Assuming TLT exists, else we might need synthetic
+            if 'VUSTX' in price_data.columns: return 'VUSTX'
+            return 'TLT' 
         if target_ticker in ['GSD.SI']:
+            if current_date and current_date < pd.Timestamp('2004-11-18') and 'GC=F' in price_data.columns:
+                return 'GC=F'
             return 'GLD'
         if target_ticker in ['WTMF']:
             return 'CASH' # Simulate Cash for managed futures in proxy mode
@@ -840,8 +843,20 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
                 daily_trends[t] = proxy_trend_bear
                 
             # Gold
-            if 'GLD' in trend_bear_all.columns:
-                daily_trends['GSD.SI'] = trend_bear_all.loc[date]['GLD']
+            gold_proxy = 'GLD'
+            if date < pd.Timestamp('2004-11-18') and 'GC=F' in trend_bear_all.columns:
+                 gold_proxy = 'GC=F'
+            
+            if gold_proxy in trend_bear_all.columns:
+                daily_trends['GSD.SI'] = trend_bear_all.loc[date][gold_proxy]
+
+            # Bond Proxy Trend (MBH.SI -> VUSTX/TLT)
+            bond_proxy = 'TLT'
+            if 'VUSTX' in trend_bear_all.columns:
+                bond_proxy = 'VUSTX'
+            
+            if bond_proxy in trend_bear_all.columns:
+                daily_trends['MBH.SI'] = trend_bear_all.loc[date][bond_proxy]
         else:
             if date in trend_bear_all.index:
                 daily_trends = trend_bear_all.loc[date].to_dict()
@@ -853,7 +868,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         # --- Map Targets to Available Assets (Proxy Translation) ---
         final_weights = {}
         for t, w in targets.items():
-            mapped_asset = map_target_to_asset(t)
+            mapped_asset = map_target_to_asset(t, date)
             if mapped_asset == 'CASH':
                 # Cash means 0 return, we just don't invest it
                 pass 
@@ -977,6 +992,8 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     # 60/40
     s_6040 = pd.Series(dtype=float)
     bond_ticker = 'TLT'
+    if use_proxies and 'VUSTX' in price_data.columns:
+        bond_ticker = 'VUSTX'
     # If TLT missing in proxy mode, maybe we can't do 60/40 easily without a bond proxy
     
     if bench_ticker in price_data.columns and bond_ticker in price_data.columns:
@@ -997,7 +1014,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         if date in returns_df.index:
             rets = returns_df.loc[date]
             for t, w in default_targets.items():
-                mapped_t = map_target_to_asset(t)
+                mapped_t = map_target_to_asset(t, date)
                 if mapped_t in rets and mapped_t != 'CASH':
                     daily_ret += w * rets[mapped_t]
         curr_n = curr_n * (1 + daily_ret)
@@ -1103,10 +1120,11 @@ def determine_macro_state(row, params=None):
         return "NEUTRAL"
 
 @st.cache_data
-def get_historical_macro_data(start_date, end_date, ma_window=200, params=None):
+def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, use_proxies=False):
     """
     Fetches and calculates macro states for a given date range.
     Includes buffer to ensure valid data at start_date.
+    use_proxies: If True, prioritizes Indices (^GSPC, VUSTX) over ETFs for longer history.
     """
     if params is None:
         params = {
@@ -1124,7 +1142,8 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None):
 
     # 1. Fetch Market Data
     # Added ^GSPC (S&P 500) for longer history check if IWY is missing
-    tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD', '^GSPC']
+    # Added VUSTX (Vanguard Long-Term Treasury) for longer bond history (since 1986)
+    tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD', '^GSPC', 'VUSTX']
     try:
         df_all = yf.download(tickers, start=fetch_start, end=fetch_end, progress=False, auto_adjust=False)
         
@@ -1181,24 +1200,41 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None):
         tnx_col = '^TNX' if '^TNX' in data.columns else data.columns[0]
         tnx_roc = (data[tnx_col] - data[tnx_col].shift(21)) / data[tnx_col].shift(21)
         
-        # Correlation
-        if 'IWY' in data.columns and 'TLT' in data.columns:
+        # Correlation & Series Selection
+        # If use_proxies is True, we FORCE the use of Indices (^GSPC, VUSTX) to ensure we get data back to 1990s.
+        # Otherwise, we prefer the actual ETFs (IWY, TLT).
+        
+        prefer_etfs = ('IWY' in data.columns) and ('TLT' in data.columns) and (not use_proxies)
+
+        if prefer_etfs:
             corr = data['IWY'].rolling(60).corr(data['TLT'])
             iwy_series = data['IWY']
         elif '^GSPC' in data.columns:
-            # Fallback to S&P 500 if IWY is missing (for long history)
+            # Fallback or Proxy mode: Use S&P 500
             iwy_series = data['^GSPC']
-            if 'TLT' in data.columns:
-                 corr = data['^GSPC'].rolling(60).corr(data['TLT'])
-            elif '^TNX' in data.columns:
-                 # Proxy Bond Price with inverse TNX for correlation? Rough approx.
-                 # Better to just use 0 if no bond price.
-                 corr = pd.Series(0, index=data.index)
+            
+            # For correlation, prefer VUSTX if using proxies or if TLT is missing/short
+            bond_series = None
+            if use_proxies and 'VUSTX' in data.columns:
+                bond_series = data['VUSTX']
+            elif 'TLT' in data.columns:
+                # Check if TLT has enough history? 
+                # For simplicity, if not forcing proxies, try TLT first, fallback to VUSTX
+                tlt_series = data['TLT']
+                if 'VUSTX' in data.columns:
+                    bond_series = data['VUSTX']
+                else:
+                    bond_series = data['TLT']
+            elif 'VUSTX' in data.columns:
+                bond_series = data['VUSTX']
+            
+            if bond_series is not None:
+                corr = data['^GSPC'].rolling(60).corr(bond_series)
             else:
-                 corr = pd.Series(0, index=data.index)
+                corr = pd.Series(0, index=data.index)
         else:
             corr = pd.Series(0, index=data.index)
-            iwy_series = data.iloc[:, 0]
+            iwy_series = data.iloc[:, 0] if not data.empty else pd.Series(dtype=float)
         
         # Trend
         iwy_ma = iwy_series.rolling(ma_window).mean()
@@ -1212,7 +1248,8 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None):
             
         # Style Trend
         style_value_regime = pd.Series(False, index=data.index)
-        if 'IWY' in data.columns and 'IWD' in data.columns:
+        # Only use IWY/IWD if NOT using proxies (since IWD history is short)
+        if not use_proxies and 'IWY' in data.columns and 'IWD' in data.columns:
             pair_ratio = data['IWY'] / data['IWD']
             pair_ma = pair_ratio.rolling(ma_window).mean()
             style_value_regime = pair_ratio < pair_ma 
@@ -1561,7 +1598,7 @@ def render_historical_backtest_section():
         c_adv1, c_adv2 = st.columns(2)
         with c_adv1:
             st.markdown("**1. 样本外测试 (Out-of-Sample)**")
-            use_proxies = st.checkbox("启用代理资产 (Use Proxies)", help="使用 S&P500, NDX, GLD 等替代 ETF 以回测 2000 年前的数据。", key="bt_use_proxies")
+            use_proxies = st.checkbox("启用代理资产 (Use Proxies)", help="使用 S&P500, VUSTX(1986+), GC=F 等替代 ETF 以支持更长历史回测 (1990+)。", key="bt_use_proxies")
             ma_window = st.number_input("动量窗口 (MA Window)", step=10, help="默认 200 日均线。尝试 150 或 250 测试敏感性。", key="bt_ma_window")
             
         with c_adv2:
@@ -1583,7 +1620,7 @@ def render_historical_backtest_section():
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         # Default start date logic
-        def_start = datetime.date(2000, 1, 1) if use_proxies else datetime.date.today()-datetime.timedelta(days=365*5)
+        def_start = datetime.date(1990, 1, 1) if use_proxies else datetime.date.today()-datetime.timedelta(days=365*5)
         if def_start > datetime.date.today(): def_start = datetime.date.today() - datetime.timedelta(days=365)
         
         dates = st.date_input("回测时间", [def_start, datetime.date.today()])
@@ -1595,7 +1632,7 @@ def render_historical_backtest_section():
         
     if run and isinstance(dates, tuple) and len(dates)==2:
         with st.spinner("回测中..."):
-            df_states, err = get_historical_macro_data(dates[0], dates[1], ma_window=int(ma_window), params=custom_params)
+            df_states, err = get_historical_macro_data(dates[0], dates[1], ma_window=int(ma_window), params=custom_params, use_proxies=use_proxies)
             if not df_states.empty:
                 res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies)
                 if res is not None:
@@ -1833,7 +1870,8 @@ def render_historical_backtest_section():
                         st.plotly_chart(fig_to, use_container_width=True)
                     
             else:
-                st.error(f"无法获取数据: {err}")
+                msg = err if err else "该时间段内无有效数据 (可能是因为数据源不足，请尝试勾选 'Use Proxies' 或缩短时间范围)"
+                st.error(f"无法获取数据: {msg}")
 
 def render_alert_config_ui():
     """Renders the configuration UI for auto-alerts."""
