@@ -254,34 +254,50 @@ def send_strategy_email(metrics, config):
 
     html_content = f"""
     <html>
-    <body>
-        <h2>📊 宏观策略日报 (Macro Strategy Alert)</h2>
-        <p><b>日期:</b> {metrics['date']}</p>
-        
-        <div style="padding: 15px; background-color: {s_conf['bg_color']}; border-left: 5px solid {s_conf['border_color']};">
-            <h3 style="margin-top:0;">当前状态: {s_conf['icon']} {s_conf['display']}</h3>
-            <p>{s_conf['desc']}</p>
+    <body style="font-family: Arial, sans-serif; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+            <div style="background-color: {s_conf['bg_color']}; padding: 20px; border-bottom: 5px solid {s_conf['border_color']};">
+                <h2 style="margin: 0; color: #202124;">{s_conf['icon']} 宏观策略日报</h2>
+                <p style="margin: 5px 0 0 0; opacity: 0.8;">{metrics['date']} | 状态更新</p>
+            </div>
+            
+            <div style="padding: 20px;">
+                <div style="padding: 15px; background-color: #f8f9fa; border-radius: 6px; margin-bottom: 20px;">
+                    <h3 style="margin-top: 0; color: {s_conf['border_color']};">当前状态: {s_conf['display']}</h3>
+                    <p style="margin-bottom: 0; line-height: 1.5;">{s_conf['desc']}</p>
+                </div>
+                
+                <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">📈 核心指标 (Key Metrics)</h3>
+                <ul style="line-height: 1.6;">
+                    <li><b>利率冲击 (Rate Shock):</b> {metrics['tnx_roc']:.1%} <span style="color: {'red' if metrics['rate_shock'] else 'green'};">({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</span></li>
+                    <li><b>衰退信号 (Sahm Rule):</b> {metrics['sahm']:.2f} <span style="color: {'red' if metrics['recession'] else 'green'};">({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</span></li>
+                    <li><b>恐慌指数 (VIX):</b> {metrics['vix']:.1f} <span style="color: {'orange' if metrics['fear'] else 'green'};">({'⚠️ 恐慌' if metrics['fear'] else '✅ 正常'})</span></li>
+                    <li><b>股债相关性 (Corr):</b> {metrics['corr']:.2f} <span style="color: {'red' if metrics['corr_broken'] else 'green'};">({'⚠️ 失效' if metrics['corr_broken'] else '✅ 正常'})</span></li>
+                </ul>
+
+                <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">🎯 战术微调 (Tactical)</h3>
+                <ul style="line-height: 1.6;">
+                    <li><b>黄金趋势:</b> {'🐻 Bearish (回避)' if metrics['gold_bear'] else '🐂 Bullish (持有)'}</li>
+                    <li><b>风格轮动:</b> {'🧱 Value (价值优先)' if metrics['value_regime'] else '🚀 Growth (成长优先)'}</li>
+                    <li><b>收益率曲线 (10Y-2Y):</b> {metrics.get('yield_curve', 0):.2f}% ({'⚠️ 倒挂/解倒挂' if (metrics.get('yield_curve', 0) < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})</li>
+                </ul>
+                
+                <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">📊 建议配置 (Target Allocation)</h3>
+                <table border="0" cellpadding="8" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                    <tr style="background-color: #f2f2f2; text-align: left;">
+                        <th style="border-bottom: 2px solid #ddd;">资产名称</th>
+                        <th style="border-bottom: 2px solid #ddd;">代码</th>
+                        <th style="border-bottom: 2px solid #ddd;">目标仓位</th>
+                    </tr>
+                    {target_rows}
+                </table>
+                
+                <p style="font-size: 12px; color: #999; margin-top: 30px; text-align: center; border-top: 1px solid #eee; padding-top: 10px;">
+                    此邮件由 Stock Strategy Analyzer 自动生成。<br>
+                    投资有风险，决策需谨慎。
+                </p>
+            </div>
         </div>
-        
-        <h3>📈 核心指标 (Key Metrics)</h3>
-        <ul>
-            <li><b>利率冲击 (Rate Shock):</b> {metrics['tnx_roc']:.1%} ({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</li>
-            <li><b>衰退信号 (Sahm Rule):</b> {metrics['sahm']:.2f} ({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</li>
-            <li><b>恐慌指数 (VIX):</b> {metrics['vix']:.1f}</li>
-            <li><b>股债相关性 (Corr):</b> {metrics['corr']:.2f}</li>
-            <li><b>黄金趋势:</b> {'🐻 Bearish' if metrics['gold_bear'] else '🐂 Bullish'}</li>
-        </ul>
-        
-        <h3>🎯 建议配置 (Target Allocation)</h3>
-        <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse;">
-            <tr style="background-color: #f2f2f2;"><th>资产名称</th><th>代码</th><th>目标仓位</th></tr>
-            {target_rows}
-        </table>
-        
-        <p style="font-size: small; color: gray; margin-top: 20px;">
-            此邮件由 Stock Strategy Analyzer 自动生成。<br>
-            投资有风险，决策需谨慎。
-        </p>
     </body>
     </html>
     """
@@ -303,59 +319,70 @@ def send_strategy_email(metrics, config):
         return False, f"邮件发送失败: {str(e)}"
 
 # --- Background Scheduler (Lightweight) ---
-if 'scheduler_started' not in st.session_state:
-    st.session_state['scheduler_started'] = False
 
-def run_scheduler_check():
-    """Checks if alert needs to be sent. Runs in background thread."""
-    while True:
-        cfg = load_alert_config()
-        if cfg.get("enabled", False) and cfg.get("frequency") != "Manual":
-            now = datetime.datetime.now()
-            trigger_hm = cfg.get("trigger_time", "09:00")
-            last_run_str = cfg.get("last_run", "")
-            
-            should_run = False
-            today_str = now.strftime('%Y-%m-%d')
-            
-            # Simple check: Is it past trigger time AND haven't run today?
-            trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M")
-            
-            if now >= trigger_dt:
-                # Check frequency
-                if cfg["frequency"] == "Daily":
-                    if last_run_str != today_str:
-                        should_run = True
-                elif cfg["frequency"] == "Weekly":
-                    # Assume Monday is trigger day
-                    if now.weekday() == 0 and last_run_str != today_str:
-                        should_run = True
-            
-            if should_run:
-                print(f"[Scheduler] Triggering auto-analysis at {now}")
-                success, res = analyze_market_state_logic()
-                if success:
-                    email_ok, msg = send_strategy_email(res, cfg)
-                    if email_ok:
-                        print(f"[Scheduler] Email sent: {msg}")
-                        cfg["last_run"] = today_str
-                        save_alert_config(cfg)
+@st.cache_resource
+def start_scheduler_service():
+    """
+    Starts the background scheduler in a singleton thread.
+    Uses @st.cache_resource to ensure only one thread runs per server process,
+    preventing duplicate emails when multiple tabs are open.
+    """
+    def run_scheduler_check():
+        """Checks if alert needs to be sent. Runs in background thread."""
+        while True:
+            cfg = load_alert_config()
+            if cfg.get("enabled", False) and cfg.get("frequency") != "Manual":
+                now = datetime.datetime.now()
+                trigger_hm = cfg.get("trigger_time", "09:00")
+                last_run_str = cfg.get("last_run", "")
+                
+                should_run = False
+                today_str = now.strftime('%Y-%m-%d')
+                
+                # Simple check: Is it past trigger time AND haven't run today?
+                try:
+                    trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M")
+                except:
+                    # Fallback if time parse fails
+                    trigger_dt = datetime.datetime.strptime(f"{today_str} 09:00", "%Y-%m-%d %H:%M")
+                
+                if now >= trigger_dt:
+                    # Check frequency
+                    if cfg["frequency"] == "Daily":
+                        if last_run_str != today_str:
+                            should_run = True
+                    elif cfg["frequency"] == "Weekly":
+                        # Assume Monday is trigger day (weekday=0)
+                        if now.weekday() == 0 and last_run_str != today_str:
+                            should_run = True
+                
+                if should_run:
+                    print(f"[Scheduler] Triggering auto-analysis at {now}")
+                    success, res = analyze_market_state_logic()
+                    if success:
+                        email_ok, msg = send_strategy_email(res, cfg)
+                        if email_ok:
+                            print(f"[Scheduler] Email sent: {msg}")
+                            # Critical: Reload config to avoid race conditions (minimal)
+                            # But we are single thread now, so safe.
+                            cfg = load_alert_config() 
+                            cfg["last_run"] = today_str
+                            save_alert_config(cfg)
+                        else:
+                            print(f"[Scheduler] Email failed: {msg}")
                     else:
-                        print(f"[Scheduler] Email failed: {msg}")
-                else:
-                    print(f"[Scheduler] Analysis failed: {res}")
-        
-        time.sleep(60) # Check every minute
+                        print(f"[Scheduler] Analysis failed: {res}")
+            
+            time.sleep(60) # Check every minute
 
-def start_background_thread():
-    if not st.session_state['scheduler_started']:
-        t = threading.Thread(target=run_scheduler_check, daemon=True)
-        t.start()
-        st.session_state['scheduler_started'] = True
-        print("[System] Background scheduler thread started.")
+    # Create and start the thread
+    t = threading.Thread(target=run_scheduler_check, daemon=True)
+    t.start()
+    print("[System] Global background scheduler service started.")
+    return t
 
-# Start scheduler on import/run
-start_background_thread()
+# Start scheduler (Singleton)
+start_scheduler_service()
 
 # --- Shared Logic for Backtest & State Machine ---
 
@@ -630,6 +657,10 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     # Track allocation history
     history_records = []
     
+    # Turnover tracking
+    prev_targets = {}
+    prev_rets = None
+    
     # We iterate daily. To speed up, we could vectorise, but logic is complex.
     # Logic: Daily return = Sum(Weight_i * Return_i)
     # This assumes we rebalance to target weights DAILY.
@@ -651,10 +682,77 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         
         targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends)
         
+        # --- Calculate Turnover (Trading Volume) ---
+        # Compare current 'targets' with 'prev_targets' adjusted for drift
+        daily_turnover = 0.0
+        
+        if not prev_targets:
+            # First day: turnover is the sum of all positions (building portfolio)
+            daily_turnover = sum(targets.values())
+        else:
+            # Calculate "Drifted Weights" from previous day
+            # Formula: W_drifted_i = W_prev_i * (1 + r_i) / (1 + R_port)
+            # R_port = Sum(W_prev_i * r_i) + W_cash * 0
+            
+            # 1. Calculate value of each component after drift
+            drifted_values = {}
+            total_drifted_val = 0.0
+            
+            # Assets
+            for t, w in prev_targets.items():
+                # Return of this asset on the PREVIOUS day (which caused the drift)
+                # Note: We need returns of 'date' if we assume we held prev_targets UNTIL 'date' rebalance.
+                # Logic: We held 'prev_targets' from 'prev_date' to 'date'. 
+                # The return generated is 'returns_df.loc[date]'.
+                # So the weight drifts based on 'returns_df.loc[date]'.
+                # THEN we rebalance to 'targets'.
+                
+                # Wait, the loop calculates return for 'targets' on 'date'.
+                # This implies 'targets' are held THROUGHOUT 'date'.
+                # So the rebalance happens at START of 'date' (or END of 'date-1').
+                # So drift comes from 'prev_rets' (returns of date-1).
+                
+                r = 0.0
+                if prev_rets is not None and t in prev_rets:
+                    r = prev_rets[t]
+                
+                val = w * (1 + r)
+                drifted_values[t] = val
+                total_drifted_val += val
+                
+            # Cash (implied)
+            prev_cash_w = max(0.0, 1.0 - sum(prev_targets.values()))
+            drifted_cash_val = prev_cash_w * 1.0 # Cash return 0
+            total_drifted_val += drifted_cash_val
+            
+            # 2. Normalize to get Drifted Weights
+            if total_drifted_val > 0:
+                drifted_weights = {t: v / total_drifted_val for t, v in drifted_values.items()}
+                drifted_cash_w = drifted_cash_val / total_drifted_val
+            else:
+                drifted_weights = prev_targets
+                drifted_cash_w = prev_cash_w
+
+            # 3. Compare with New Targets
+            diff_sum = 0.0
+            all_assets = set(targets.keys()) | set(drifted_weights.keys())
+            
+            for t in all_assets:
+                w_tgt = targets.get(t, 0.0)
+                w_drift = drifted_weights.get(t, 0.0)
+                diff_sum += abs(w_tgt - w_drift)
+            
+            # Don't forget Cash difference
+            curr_cash_w = max(0.0, 1.0 - sum(targets.values()))
+            diff_sum += abs(curr_cash_w - drifted_cash_w)
+            
+            daily_turnover = diff_sum / 2.0 # One-sided turnover
+            
         # Record history
         rec = targets.copy()
         rec['Date'] = date
         rec['State'] = s
+        rec['Turnover'] = daily_turnover
         history_records.append(rec)
         
         # Calculate Portfolio Return for this day
@@ -663,14 +761,21 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         # So return is sum(w * r).
         
         daily_ret = 0.0
+        current_rets = pd.Series(dtype=float)
+        
         if date in returns_df.index:
-            rets = returns_df.loc[date]
+            current_rets = returns_df.loc[date]
             for t, w in targets.items():
-                if t in rets:
-                    daily_ret += w * rets[t]
+                if t in current_rets:
+                    daily_ret += w * current_rets[t]
         
         current_val = current_val * (1 + daily_ret)
         portfolio_values.append(current_val)
+        
+        # Prepare for next iteration
+        prev_targets = targets
+        prev_rets = current_rets
+
         
     s_strategy = pd.Series(portfolio_values, index=df_states.index, name="Strategy")
     
@@ -1391,6 +1496,64 @@ def render_historical_backtest_section():
                         column_config=col_config,
                         hide_index=True
                     )
+                    
+                    # --- 4. Trading Costs & Frequency Analysis ---
+                    if df_history is not None and 'Turnover' in df_history.columns:
+                        st.markdown("---")
+                        st.markdown("#### 💸 交易成本与频率 (Trading Costs & Frequency)")
+                        
+                        # Calculate Stats
+                        total_days = len(df_history)
+                        years = total_days / 252.0 if total_days > 0 else 0
+                        
+                        # Total One-sided Turnover (sum of daily portions)
+                        # We skip the first day (initial allocation) for "churn" metrics, 
+                        # but keeping it shows total volume. Usually exclude day 1 for "Strategy Turnover".
+                        
+                        if total_days > 1:
+                            turnover_series = df_history['Turnover'].iloc[1:] # Exclude initial setup
+                            total_turnover = turnover_series.sum()
+                            avg_daily_turnover = turnover_series.mean()
+                            annual_turnover = avg_daily_turnover * 252
+                            
+                            # Est Cost (bps)
+                            cost_bps = 10 # 0.10% per side
+                            total_cost_est = total_turnover * (cost_bps / 10000)
+                            annual_cost_est = annual_turnover * (cost_bps / 10000)
+                            
+                            # Avg Holding Period (Days)
+                            # Formula: 1 / Daily Turnover (approx)
+                            avg_hold_days = 1 / avg_daily_turnover if avg_daily_turnover > 0 else 0
+                        else:
+                            annual_turnover = 0
+                            annual_cost_est = 0
+                            avg_hold_days = 0
+
+                        c1, c2, c3, c4 = st.columns(4)
+                        with c1:
+                            st.metric("年化换手率 (Annual Turnover)", f"{annual_turnover:.1%}", help="平均每年调整仓位的总比例 (单边)")
+                        with c2:
+                            st.metric("平均持仓周期 (Avg Hold)", f"{avg_hold_days:.1f} 天", help="平均每笔资金持有的天数")
+                        with c3:
+                            st.metric("预估年化成本 (Est. Cost)", f"{annual_cost_est:.2%}", help=f"基于单边 {cost_bps}bps ({cost_bps/100}%) 手续费估算的年化拖累")
+                        with c4:
+                            # Trading Frequency (Days with > 1% turnover)
+                            active_days = df_history[df_history['Turnover'] > 0.01].count()['Turnover']
+                            freq_pct = active_days / total_days if total_days > 0 else 0
+                            st.metric("活跃交易频率", f"{freq_pct:.1%}", help="日换手率超过 1% 的天数比例")
+
+                        # Chart: Rolling Turnover
+                        # st.bar_chart(df_history['Turnover']) # Simple bar
+                        
+                        fig_to = go.Figure()
+                        fig_to.add_trace(go.Bar(x=df_history.index, y=df_history['Turnover'], name='Daily Turnover'))
+                        fig_to.update_layout(
+                            title="每日换手率 (Daily Turnover)", 
+                            yaxis=dict(title="Turnover %", tickformat=".1%"),
+                            template="plotly_white",
+                            height=300
+                        )
+                        st.plotly_chart(fig_to, use_container_width=True)
                     
             else:
                 st.error(f"无法获取数据: {err}")
