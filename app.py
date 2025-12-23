@@ -18,9 +18,51 @@ import threading
 import time
 
 # Set page config must be the first streamlit command
-st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer")
+st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer v1.4")
 
 # --- Helper Functions for Indicators ---
+
+def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+    """
+    Returns a list of strings explaining why the allocation differs from the base static model.
+    """
+    if asset_trends is None: asset_trends = {}
+    reasons = []
+    
+    # 1. Style Regime
+    if s in ["NEUTRAL", "CAUTIOUS_TREND"] and value_regime:
+        reasons.append("🧱 风格轮动: 价值占优 (Value Regime) -> 增加红利，减少成长")
+        
+    # 2. Dynamic Risk Control
+    if s == "NEUTRAL":
+        if vix is not None:
+            if vix < 13.0:
+                reasons.append("🚀 极度平稳 (VIX < 13): 激进模式 -> 清空WTMF/减债，加仓成长")
+            elif vix > 20.0:
+                reasons.append("🌬️ 早期预警 (VIX > 20): 避险模式 -> 减仓成长 20%，增加 WTMF")
+    
+    if s in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"]:
+        if yield_curve is not None and yield_curve < -0.30:
+            reasons.append("⚠️ 深度倒挂 (Yield Curve < -0.3%): 债券陷阱 -> 大幅削减 MBH，转入 WTMF")
+
+    # 3. Trend Filters
+    if s != "EXTREME_ACCUMULATION":
+        # Global Filter
+        assets_to_check = ['G3B.SI', 'LVHI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI']
+        bear_assets = [t for t in assets_to_check if asset_trends.get(t, False)]
+        if bear_assets:
+            reasons.append(f"📉 趋势熔断: {', '.join(bear_assets)} 破位 -> 清仓")
+            
+        # Core IWY Filter
+        if asset_trends.get('IWY', False):
+            cut = "80%" if (vix and vix > 25) else "50%"
+            reasons.append(f"🛡️ 核心熔断: IWY 破位 -> 削减 {cut} 仓位")
+            
+    # 4. Gold
+    if gold_bear:
+        reasons.append("🐻 黄金熊市: Gold < MA200 -> 清仓 GSD.SI")
+        
+    return reasons
 
 # Removed cache for debugging connection issues
 def fetch_fred_data(series_id):
@@ -259,6 +301,26 @@ def send_strategy_email(metrics, config):
         if w > 0:
             target_rows += f"<tr><td>{ASSET_NAMES.get(t, t)}</td><td>{t}</td><td><b>{w*100:.1f}%</b></td></tr>"
 
+    # Get Adjustment Reasons
+    adjustments = get_adjustment_reasons(
+        state, 
+        gold_bear=metrics['gold_bear'], 
+        value_regime=metrics['value_regime'], 
+        asset_trends=metrics.get('asset_trends', {}),
+        vix=metrics.get('vix'),
+        yield_curve=metrics.get('yield_curve')
+    )
+
+    adj_html = ""
+    if adjustments:
+        adj_list = "".join([f"<li>{r}</li>" for r in adjustments])
+        adj_html = f"""
+        <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">🔧 动态风控触发 (Active Adjustments)</h3>
+        <ul style="line-height: 1.6; color: #d93025;">
+            {adj_list}
+        </ul>
+        """
+
     html_content = f"""
     <html>
     <body style="font-family: Arial, sans-serif; color: #333;">
@@ -288,6 +350,8 @@ def send_strategy_email(metrics, config):
                     <li><b>风格轮动:</b> {'🧱 Value (价值优先)' if metrics['value_regime'] else '🚀 Growth (成长优先)'}</li>
                     <li><b>收益率曲线 (10Y-2Y):</b> {metrics.get('yield_curve', 0):.2f}% ({'⚠️ 倒挂/解倒挂' if (metrics.get('yield_curve', 0) < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})</li>
                 </ul>
+
+                {adj_html}
                 
                 <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">📊 建议配置 (Target Allocation)</h3>
                 <table border="0" cellpadding="8" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-top: 10px;">
@@ -1399,6 +1463,21 @@ def render_factor_dashboard(metrics):
     with c3:
         vr = metrics['value_regime']
         st.metric("风格轮动", "Value Regime" if vr else "Growth Regime", "Tilt Value" if vr else "Tilt Growth", delta_color="off")
+
+    # Show Active Adjustments
+    adjustments = get_adjustment_reasons(
+        metrics['state'], 
+        gold_bear=metrics['gold_bear'], 
+        value_regime=metrics['value_regime'], 
+        asset_trends=metrics.get('asset_trends', {}),
+        vix=metrics.get('vix'),
+        yield_curve=metrics.get('yield_curve')
+    )
+    
+    if adjustments:
+        with st.expander("🔧 动态风控触发 (Active Strategy Adjustments)", expanded=True):
+            for adj in adjustments:
+                st.markdown(f"- {adj}")
 
 def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None):
     """Renders the rebalancing table."""
