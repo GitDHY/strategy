@@ -163,7 +163,7 @@ def analyze_market_state_logic():
     # --- Fetch Portfolio Asset Trends (Dual Momentum) ---
     asset_trends = {}
     try:
-        check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI', 'IWY']
+        check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI', 'IWY', 'MBH.SI', 'GSD.SI']
         trend_start = datetime.date.today() - datetime.timedelta(days=400)
         # Fetch latest data
         data_raw = yf.download(check_assets, start=trend_start, progress=False, auto_adjust=False)
@@ -370,6 +370,7 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
 
     targets = {}
     
+    # --- 1. Base Allocation (基于宏观状态的原始配置) ---
     if s == "INFLATION_SHOCK":
         # Rate Spike: Kill Duration, Cash is King
         targets = {
@@ -385,7 +386,7 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
             'SRT.SI': 0.00, 'AJBU.SI': 0.00
         }
     elif s == "EXTREME_ACCUMULATION":
-        # Buy Dip
+        # Buy Dip (左侧交易，不进行动量过滤，因为价格通常都在均线下方)
         targets = {
             'IWY': 0.70, 'WTMF': 0.00, 'LVHI': 0.00,
             'G3B.SI': 0.10, 'MBH.SI': 0.05, 'GSD.SI': 0.05,
@@ -425,33 +426,45 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
 
-        # --- Enhanced Momentum Filter (Dual Momentum) ---
-        # Even in NEUTRAL, if specific assets are in a downtrend (Price < MA200),
-        # cut their allocation and move capital to IWY (if strong) or WTMF (Defense).
+    # --- 2. Global Dynamic Trend Filter (全局动态趋势过滤) ---
+    # 逻辑：除了“极度贪婪/抄底”模式外，任何资产如果处于熊市趋势（价格 < MA200），都应该被削减。
+    # 目的：避免在宏观误判或流动性危机时死守下跌资产。
+    
+    if s != "EXTREME_ACCUMULATION":
+        # 需要检查趋势的资产列表 (IWY 单独处理，这里检查配角)
+        assets_to_check = ['G3B.SI', 'LVHI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI']
         
-        # Assets to check for momentum
-        mom_check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI']
-        
-        for asset in mom_check_assets:
-            if asset_trends.get(asset, False): # If Asset is Bearish
-                if asset in targets and targets[asset] > 0:
-                    weight_to_move = targets[asset]
-                    targets[asset] = 0.0
-                    
-                    # Reallocate
-                    # If IWY is NOT bearish (based on asset_trends or macro Trend_Bear), move to IWY
-                    # But get_target_percentages doesn't know macro Trend_Bear explicitly here easily unless passed.
-                    # However, NEUTRAL implies IWY is generally OK (otherwise CAUTIOUS_TREND).
-                    # We can check asset_trends['IWY'] if available.
-                    
-                    if asset_trends.get('IWY', False):
-                        # IWY is also weak? Move to WTMF (Cash Proxy)
-                        targets['WTMF'] += weight_to_move
+        for asset in assets_to_check:
+            # 如果该资产在当前配置中有仓位，且处于熊市趋势
+            if targets.get(asset, 0) > 0 and asset_trends.get(asset, False):
+                weight_to_move = targets[asset]
+                targets[asset] = 0.0 # 清仓该弱势资产
+                
+                # --- 资金去向逻辑 ---
+                if s == "NEUTRAL":
+                    # 牛市逻辑：如果配角弱，资金去主角 (IWY)。
+                    # 但前提是主角 (IWY) 自己必须强。
+                    if not asset_trends.get('IWY', False): # IWY is NOT bearish
+                         targets['IWY'] += weight_to_move
                     else:
-                        # IWY is strong/neutral -> Add to Growth
-                        targets['IWY'] += weight_to_move
-        
-    # Gold Trend Filter: If Gold is Bearish, cut allocation by half, move to WTMF (Cash proxy)
+                         # 如果连 IWY 都弱，那就去避险 (WTMF)
+                         targets['WTMF'] += weight_to_move
+                else:
+                    # 熊市/震荡逻辑 (Cautious/Recession/Shock)：
+                    # 风险厌恶。如果防御资产都跌（例如债熊），资金必须去现金/危机Alpha (WTMF)。
+                    targets['WTMF'] += weight_to_move
+
+    # --- 3. IWY (Core) Safety Valve (核心资产熔断) ---
+    # 如果处于非抄底模式，且核心资产 IWY 破位，必须大幅降低风险
+    if s != "EXTREME_ACCUMULATION" and targets.get('IWY', 0) > 0:
+        if asset_trends.get('IWY', False): # IWY is Bearish
+            # 削减一半 IWY 仓位，移至 WTMF
+            cut_amount = targets['IWY'] * 0.5
+            targets['IWY'] -= cut_amount
+            targets['WTMF'] += cut_amount
+
+    # --- 4. Gold Trend Filter (Legacy) ---
+    # 保留原有的黄金独立判断，作为最后一道防线
     if gold_bear and targets.get('GSD.SI', 0) > 0:
         cut_amount = targets['GSD.SI'] * 0.5
         targets['GSD.SI'] -= cut_amount
@@ -1160,8 +1173,8 @@ def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear,
         data.append({
             "代码": tkr,
             "名称": ASSET_NAMES.get(tkr, tkr),
-            "目标仓位": tgt_pct,
-            "当前仓位": curr_pct,
+            "目标仓位": tgt_pct * 100,
+            "当前仓位": curr_pct * 100,
             "当前市值": curr_val,
             "建议操作": action,
             "diff": diff_val # For sort
@@ -1176,8 +1189,8 @@ def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear,
         st.dataframe(
             df,
             column_config={
-                "目标仓位": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1),
-                "当前仓位": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=1),
+                "目标仓位": st.column_config.NumberColumn(format="%.1f%%"),
+                "当前仓位": st.column_config.NumberColumn(format="%.1f%%"),
                 "当前市值": st.column_config.NumberColumn(format="$%.0f"),
             },
             hide_index=True,
