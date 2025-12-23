@@ -655,13 +655,25 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
 
     return results
 
-def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0):
+def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0, ma_window=200, use_proxies=False):
     """
     Simulates the strategy over historical states.
     df_states: DataFrame with 'State', 'Gold_Bear', 'Value_Regime' columns, indexed by Date.
     """
     # 1. Define Asset Universe
-    assets = ['IWY', 'WTMF', 'LVHI', 'G3B.SI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI', 'TLT', 'SPY']
+    # If using proxies (for long-term history > 20 years), we map ETFs to Indices
+    if use_proxies:
+        # Proxy Mapping:
+        # IWY -> ^GSPC (S&P 500) as generic equity
+        # WTMF -> Cash (Simulated) or similar? Hard to proxy. We'll use Gold as partial proxy or just Cash?
+        # Let's map WTMF to Gold for Crisis Alpha in history? Or just Cash.
+        # Let's use ^GSPC for Equity, TLT for Bonds (needs check), GLD for Gold.
+        # Note: Yahoo data for GLD starts 2004. TLT 2002. 
+        # For meaningful 1990s backtest, we need Indices.
+        # But yfinance index data for 'Total Return' is hard. ^GSPC is price only (no div).
+        assets = ['^GSPC', '^NDX', 'TLT', 'GLD'] # Minimal set
+    else:
+        assets = ['IWY', 'WTMF', 'LVHI', 'G3B.SI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI', 'TLT', 'SPY']
     
     # 2. Fetch Price Data
     fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=365)
@@ -682,8 +694,9 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     price_data = price_data.ffill().bfill()
     
     # Calculate Asset Trends for Backtest (Dual Momentum)
-    ma200_all = price_data.rolling(200).mean()
-    trend_bear_all = price_data < ma200_all
+    # Use dynamic MA window
+    ma_all = price_data.rolling(ma_window).mean()
+    trend_bear_all = price_data < ma_all
     
     # Filter to requested range
     mask = (price_data.index >= pd.to_datetime(start_date)) & (price_data.index <= pd.to_datetime(end_date))
@@ -719,6 +732,23 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     
     returns_df = price_data.pct_change().fillna(0)
     
+    # Proxy Mapper Function
+    def map_target_to_asset(target_ticker):
+        if not use_proxies:
+            return target_ticker
+        
+        # Simple Proxy Logic
+        if target_ticker in ['IWY', 'G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI', 'SPY']:
+            if '^NDX' in price_data.columns and target_ticker == 'IWY': return '^NDX'
+            return '^GSPC' if '^GSPC' in price_data.columns else target_ticker
+        if target_ticker in ['TLT', 'MBH.SI']:
+            return 'TLT' # Assuming TLT exists, else we might need synthetic
+        if target_ticker in ['GSD.SI']:
+            return 'GLD'
+        if target_ticker in ['WTMF']:
+            return 'CASH' # Simulate Cash for managed futures in proxy mode
+        return target_ticker
+
     for date, row in df_states.iterrows():
         # Get Targets for today (based on today's state)
         # Note: In reality, we trade tomorrow based on today's close state?
@@ -729,12 +759,45 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         
         # Get trends for this date
         daily_trends = {}
-        if date in trend_bear_all.index:
-            daily_trends = trend_bear_all.loc[date].to_dict()
+        # We need to map the trends check to proxies too? 
+        # The strategy logic checks specific tickers. We should probably simulate trends on the Proxy.
+        # But get_target_percentages expects original tickers. 
+        # We will let get_target_percentages run as is, but we feed it "Proxy Trends" masquerading as Asset Trends.
+        
+        if use_proxies:
+            # Map proxy trends back to original tickers for the logic to consume
+            # E.g. If ^GSPC is Bearish, then IWY is Bearish
+            proxy_trend_bear = False
+            if '^GSPC' in trend_bear_all.columns:
+                proxy_trend_bear = trend_bear_all.loc[date]['^GSPC']
+            
+            # Apply to all equity
+            for t in ['IWY', 'G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI']:
+                daily_trends[t] = proxy_trend_bear
+                
+            # Gold
+            if 'GLD' in trend_bear_all.columns:
+                daily_trends['GSD.SI'] = trend_bear_all.loc[date]['GLD']
+        else:
+            if date in trend_bear_all.index:
+                daily_trends = trend_bear_all.loc[date].to_dict()
         
         vix_val = row.get('VIX')
         yc_val = row.get('YieldCurve')
         targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends, vix=vix_val, yield_curve=yc_val)
+        
+        # --- Map Targets to Available Assets (Proxy Translation) ---
+        final_weights = {}
+        for t, w in targets.items():
+            mapped_asset = map_target_to_asset(t)
+            if mapped_asset == 'CASH':
+                # Cash means 0 return, we just don't invest it
+                pass 
+            elif mapped_asset in price_data.columns:
+                final_weights[mapped_asset] = final_weights.get(mapped_asset, 0.0) + w
+            else:
+                # If mapped asset missing (e.g. TLT before 2002), hold Cash
+                pass
         
         # --- Calculate Turnover (Trading Volume) ---
         # Compare current 'targets' with 'prev_targets' adjusted for drift
@@ -742,7 +805,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         
         if not prev_targets:
             # First day: turnover is the sum of all positions (building portfolio)
-            daily_turnover = sum(targets.values())
+            daily_turnover = sum(final_weights.values())
         else:
             # Calculate "Drifted Weights" from previous day
             # Formula: W_drifted_i = W_prev_i * (1 + r_i) / (1 + R_port)
@@ -754,18 +817,6 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             
             # Assets
             for t, w in prev_targets.items():
-                # Return of this asset on the PREVIOUS day (which caused the drift)
-                # Note: We need returns of 'date' if we assume we held prev_targets UNTIL 'date' rebalance.
-                # Logic: We held 'prev_targets' from 'prev_date' to 'date'. 
-                # The return generated is 'returns_df.loc[date]'.
-                # So the weight drifts based on 'returns_df.loc[date]'.
-                # THEN we rebalance to 'targets'.
-                
-                # Wait, the loop calculates return for 'targets' on 'date'.
-                # This implies 'targets' are held THROUGHOUT 'date'.
-                # So the rebalance happens at START of 'date' (or END of 'date-1').
-                # So drift comes from 'prev_rets' (returns of date-1).
-                
                 r = 0.0
                 if prev_rets is not None and t in prev_rets:
                     r = prev_rets[t]
@@ -789,37 +840,33 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
 
             # 3. Compare with New Targets
             diff_sum = 0.0
-            all_assets = set(targets.keys()) | set(drifted_weights.keys())
+            all_assets = set(final_weights.keys()) | set(drifted_weights.keys())
             
             for t in all_assets:
-                w_tgt = targets.get(t, 0.0)
+                w_tgt = final_weights.get(t, 0.0)
                 w_drift = drifted_weights.get(t, 0.0)
                 diff_sum += abs(w_tgt - w_drift)
             
             # Don't forget Cash difference
-            curr_cash_w = max(0.0, 1.0 - sum(targets.values()))
+            curr_cash_w = max(0.0, 1.0 - sum(final_weights.values()))
             diff_sum += abs(curr_cash_w - drifted_cash_w)
             
             daily_turnover = diff_sum / 2.0 # One-sided turnover
             
         # Record history
-        rec = targets.copy()
+        rec = targets.copy() # Record original logic targets for debug
         rec['Date'] = date
         rec['State'] = s
         rec['Turnover'] = daily_turnover
         history_records.append(rec)
         
         # Calculate Portfolio Return for this day
-        # If we rebalanced yesterday to these weights?
-        # Simpler: Assume we hold these weights TODAY.
-        # So return is sum(w * r).
-        
         daily_ret = 0.0
         current_rets = pd.Series(dtype=float)
         
         if date in returns_df.index:
             current_rets = returns_df.loc[date]
-            for t, w in targets.items():
+            for t, w in final_weights.items():
                 if t in current_rets:
                     daily_ret += w * current_rets[t]
         
@@ -827,7 +874,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         portfolio_values.append(current_val)
         
         # Prepare for next iteration
-        prev_targets = targets
+        prev_targets = final_weights
         prev_rets = current_rets
 
         
@@ -841,27 +888,42 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     # 4. Benchmarks
     # SPY
     s_spy = pd.Series(dtype=float)
-    if 'SPY' in price_data.columns:
-        spy_prices = price_data['SPY']
+    bench_ticker = 'SPY'
+    if use_proxies and '^GSPC' in price_data.columns:
+        bench_ticker = '^GSPC'
+        
+    if bench_ticker in price_data.columns:
+        spy_prices = price_data[bench_ticker]
         s_spy = (spy_prices / spy_prices.iloc[0]) * initial_capital
-        s_spy.name = "SPY (Benchmark)"
+        s_spy.name = f"{bench_ticker} (Benchmark)"
 
     # IWY
     s_iwy = pd.Series(dtype=float)
-    if 'IWY' in price_data.columns:
-        iwy_prices = price_data['IWY']
+    growth_ticker = 'IWY'
+    if use_proxies and '^NDX' in price_data.columns:
+        growth_ticker = '^NDX'
+    elif use_proxies and '^GSPC' in price_data.columns:
+        growth_ticker = '^GSPC'
+        
+    if growth_ticker in price_data.columns:
+        iwy_prices = price_data[growth_ticker]
         s_iwy = (iwy_prices / iwy_prices.iloc[0]) * initial_capital
-        s_iwy.name = "IWY (Growth)"
+        s_iwy.name = f"{growth_ticker} (Growth)"
 
     # 60/40
     s_6040 = pd.Series(dtype=float)
-    if 'SPY' in price_data.columns and 'TLT' in price_data.columns:
-        spy = price_data['SPY'] / price_data['SPY'].iloc[0]
-        tlt = price_data['TLT'] / price_data['TLT'].iloc[0]
+    bond_ticker = 'TLT'
+    # If TLT missing in proxy mode, maybe we can't do 60/40 easily without a bond proxy
+    
+    if bench_ticker in price_data.columns and bond_ticker in price_data.columns:
+        spy = price_data[bench_ticker] / price_data[bench_ticker].iloc[0]
+        tlt = price_data[bond_ticker] / price_data[bond_ticker].iloc[0]
         s_6040 = (0.6 * spy + 0.4 * tlt) * initial_capital
-        s_6040.name = "60/40 (SPY/TLT)"
+        s_6040.name = "60/40 (Balanced)"
         
     # Neutral Config (Buy & Hold / Fixed Weight)
+    # Note: Neutral config logic relies on original ETFs. 
+    # In proxy mode, we need to map default targets too.
     default_targets = get_target_percentages("NEUTRAL", False, False)
     neutral_vals = []
     curr_n = initial_capital
@@ -871,8 +933,9 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         if date in returns_df.index:
             rets = returns_df.loc[date]
             for t, w in default_targets.items():
-                if t in rets:
-                    daily_ret += w * rets[t]
+                mapped_t = map_target_to_asset(t)
+                if mapped_t in rets and mapped_t != 'CASH':
+                    daily_ret += w * rets[mapped_t]
         curr_n = curr_n * (1 + daily_ret)
         neutral_vals.append(curr_n)
         
@@ -881,7 +944,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     return pd.DataFrame({
         "Dynamic Strategy": s_strategy,
         "SPY (Benchmark)": s_spy,
-        "IWY (Benchmark)": s_iwy,
+        "Growth (Benchmark)": s_iwy,
         "60/40 (Balanced)": s_6040,
         "Neutral (Fixed)": s_neutral
     }), df_history, None
@@ -939,27 +1002,36 @@ ASSET_NAMES = {
     'OTHERS': '其他/待清理资产 (Others)'
 }
 
-def determine_macro_state(row):
+def determine_macro_state(row, params=None):
     """
     Determines macro state based on a row of indicators.
     Expected row keys: Sahm, RateShock, Corr, VIX, Trend_Bear
     """
-    is_rec = row['Sahm'] >= 0.50
-    is_shock = row['RateShock'] > 0.20
-    is_c_broken = row['Corr'] > 0.3
-    is_f = row['VIX'] > 32
+    if params is None:
+        params = {
+            'sahm_threshold': 0.50,
+            'rate_shock_threshold': 0.20,
+            'corr_threshold': 0.30,
+            'vix_panic': 32,
+            'vix_recession': 35,
+            'vix_elevated': 20
+        }
+        
+    is_rec = row['Sahm'] >= params['sahm_threshold']
+    is_shock = row['RateShock'] > params['rate_shock_threshold']
+    is_c_broken = row['Corr'] > params['corr_threshold']
+    is_f = row['VIX'] > params['vix_panic']
     is_down = row['Trend_Bear']
-    is_vol_elevated = row['VIX'] > 20
+    is_vol_elevated = row['VIX'] > params['vix_elevated']
     
     if is_shock or (is_rec and is_c_broken):
         return "INFLATION_SHOCK"
-    elif is_rec or (is_down and row['VIX'] > 35):
+    elif is_rec or (is_down and row['VIX'] > params['vix_recession']):
         return "DEFLATION_RECESSION"
     elif is_f and not is_shock and not is_rec:
         return "EXTREME_ACCUMULATION"
     elif is_down:
         # Optimized: If Trend is Down, prioritize Trend signal (Defensive) over Volatility signal.
-        # This prevents holding excessive equity (via Cautious Vol) during a Volatile Bear market.
         return "CAUTIOUS_TREND"
     elif is_vol_elevated:
         return "CAUTIOUS_VOL"
@@ -967,17 +1039,28 @@ def determine_macro_state(row):
         return "NEUTRAL"
 
 @st.cache_data
-def get_historical_macro_data(start_date, end_date):
+def get_historical_macro_data(start_date, end_date, ma_window=200, params=None):
     """
     Fetches and calculates macro states for a given date range.
     Includes buffer to ensure valid data at start_date.
     """
+    if params is None:
+        params = {
+            'sahm_threshold': 0.50,
+            'rate_shock_threshold': 0.20,
+            'corr_threshold': 0.30,
+            'vix_panic': 32,
+            'vix_recession': 35,
+            'vix_elevated': 20
+        }
+
     buffer_days = 365 * 2 # Increase buffer for Sahm Rule (12m min)
     fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=buffer_days)
     fetch_end = pd.to_datetime(end_date)
 
     # 1. Fetch Market Data
-    tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD']
+    # Added ^GSPC (S&P 500) for longer history check if IWY is missing
+    tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD', '^GSPC']
     try:
         df_all = yf.download(tickers, start=fetch_start, end=fetch_end, progress=False, auto_adjust=False)
         
@@ -1038,26 +1121,40 @@ def get_historical_macro_data(start_date, end_date):
         if 'IWY' in data.columns and 'TLT' in data.columns:
             corr = data['IWY'].rolling(60).corr(data['TLT'])
             iwy_series = data['IWY']
+        elif '^GSPC' in data.columns:
+            # Fallback to S&P 500 if IWY is missing (for long history)
+            iwy_series = data['^GSPC']
+            if 'TLT' in data.columns:
+                 corr = data['^GSPC'].rolling(60).corr(data['TLT'])
+            elif '^TNX' in data.columns:
+                 # Proxy Bond Price with inverse TNX for correlation? Rough approx.
+                 # Better to just use 0 if no bond price.
+                 corr = pd.Series(0, index=data.index)
+            else:
+                 corr = pd.Series(0, index=data.index)
         else:
             corr = pd.Series(0, index=data.index)
             iwy_series = data.iloc[:, 0]
         
         # Trend
-        iwy_ma200 = iwy_series.rolling(200).mean()
-        trend_bear = iwy_series < iwy_ma200
+        iwy_ma = iwy_series.rolling(ma_window).mean()
+        trend_bear = iwy_series < iwy_ma
         
         # Gold Trend
         gold_trend_bear = pd.Series(False, index=data.index)
         if 'GLD' in data.columns:
-            gld_ma200 = data['GLD'].rolling(200).mean()
-            gold_trend_bear = data['GLD'] < gld_ma200
+            gld_ma = data['GLD'].rolling(ma_window).mean()
+            gold_trend_bear = data['GLD'] < gld_ma
             
         # Style Trend
         style_value_regime = pd.Series(False, index=data.index)
         if 'IWY' in data.columns and 'IWD' in data.columns:
             pair_ratio = data['IWY'] / data['IWD']
-            pair_ma200 = pair_ratio.rolling(200).mean()
-            style_value_regime = pair_ratio < pair_ma200 
+            pair_ma = pair_ratio.rolling(ma_window).mean()
+            style_value_regime = pair_ratio < pair_ma 
+        else:
+            # Fallback for style if ETFs missing
+            style_value_regime = pd.Series(False, index=data.index)
 
         # Assemble DataFrame
         df_hist = pd.DataFrame({
@@ -1073,7 +1170,8 @@ def get_historical_macro_data(start_date, end_date):
         }).dropna()
         
         # 4. Determine States
-        df_hist['State'] = df_hist.apply(determine_macro_state, axis=1)
+        # Pass params to the state determinator
+        df_hist['State'] = df_hist.apply(lambda row: determine_macro_state(row, params), axis=1)
         
         # Filter Output
         df_final = df_hist.loc[(df_hist.index >= pd.to_datetime(start_date)) & (df_hist.index <= pd.to_datetime(end_date))]
@@ -1363,9 +1461,46 @@ def render_historical_backtest_section():
     st.markdown("---")
     st.markdown("### 🕰️ 历史状态回溯与策略仿真")
     
+    # --- Advanced Settings (Sensitivity & Proxies) ---
+    with st.expander("⚙️ 高级回测设置 (参数敏感性与样本外测试)", expanded=False):
+        # Reset Button
+        if st.button("🔄 恢复默认设置"):
+            st.session_state["bt_use_proxies"] = False
+            st.session_state["bt_ma_window"] = 200
+            st.session_state["bt_p_sahm"] = 0.50
+            st.session_state["bt_p_vix_panic"] = 32
+            st.session_state["bt_p_vix_rec"] = 35
+            st.rerun()
+
+        c_adv1, c_adv2 = st.columns(2)
+        with c_adv1:
+            st.markdown("**1. 样本外测试 (Out-of-Sample)**")
+            use_proxies = st.checkbox("启用代理资产 (Use Proxies)", value=False, help="使用 S&P500, NDX, GLD 等替代 ETF 以回测 2000 年前的数据。", key="bt_use_proxies")
+            ma_window = st.number_input("动量窗口 (MA Window)", value=200, step=10, help="默认 200 日均线。尝试 150 或 250 测试敏感性。", key="bt_ma_window")
+            
+        with c_adv2:
+            st.markdown("**2. 阈值敏感性 (Sensitivity)**")
+            p_sahm = st.number_input("Sahm Rule", value=0.50, step=0.01, format="%.2f", key="bt_p_sahm")
+            p_vix_panic = st.number_input("VIX Panic", value=32, step=1, key="bt_p_vix_panic")
+            p_vix_rec = st.number_input("VIX Recession", value=35, step=1, key="bt_p_vix_rec")
+    
+    # Construct params dict
+    custom_params = {
+        'sahm_threshold': p_sahm,
+        'rate_shock_threshold': 0.20,
+        'corr_threshold': 0.30,
+        'vix_panic': int(p_vix_panic),
+        'vix_recession': int(p_vix_rec),
+        'vix_elevated': 20
+    }
+
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
-        dates = st.date_input("回测时间", [datetime.date.today()-datetime.timedelta(days=365*5), datetime.date.today()])
+        # Default start date logic
+        def_start = datetime.date(2000, 1, 1) if use_proxies else datetime.date.today()-datetime.timedelta(days=365*5)
+        if def_start > datetime.date.today(): def_start = datetime.date.today() - datetime.timedelta(days=365)
+        
+        dates = st.date_input("回测时间", [def_start, datetime.date.today()])
     with c2:
         cap = st.number_input("初始资金", value=10000)
     with c3:
@@ -1374,9 +1509,9 @@ def render_historical_backtest_section():
         
     if run and isinstance(dates, tuple) and len(dates)==2:
         with st.spinner("回测中..."):
-            df_states, err = get_historical_macro_data(dates[0], dates[1])
+            df_states, err = get_historical_macro_data(dates[0], dates[1], ma_window=int(ma_window), params=custom_params)
             if not df_states.empty:
-                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap)
+                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies)
                 if res is not None:
                     # Metrics & Charts (Simplified for brevity as logic exists in run_dynamic_backtest return)
                     st.success("回测完成")
