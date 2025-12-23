@@ -1542,6 +1542,13 @@ def render_historical_backtest_section():
     
     # --- Advanced Settings (Sensitivity & Proxies) ---
     with st.expander("⚙️ 高级回测设置 (参数敏感性与样本外测试)", expanded=False):
+        # Initialize Session State for Widgets to avoid warnings
+        if "bt_use_proxies" not in st.session_state: st.session_state["bt_use_proxies"] = False
+        if "bt_ma_window" not in st.session_state: st.session_state["bt_ma_window"] = 200
+        if "bt_p_sahm" not in st.session_state: st.session_state["bt_p_sahm"] = 0.50
+        if "bt_p_vix_panic" not in st.session_state: st.session_state["bt_p_vix_panic"] = 32
+        if "bt_p_vix_rec" not in st.session_state: st.session_state["bt_p_vix_rec"] = 35
+
         # Reset Button
         if st.button("🔄 恢复默认设置"):
             st.session_state["bt_use_proxies"] = False
@@ -1554,14 +1561,14 @@ def render_historical_backtest_section():
         c_adv1, c_adv2 = st.columns(2)
         with c_adv1:
             st.markdown("**1. 样本外测试 (Out-of-Sample)**")
-            use_proxies = st.checkbox("启用代理资产 (Use Proxies)", value=False, help="使用 S&P500, NDX, GLD 等替代 ETF 以回测 2000 年前的数据。", key="bt_use_proxies")
-            ma_window = st.number_input("动量窗口 (MA Window)", value=200, step=10, help="默认 200 日均线。尝试 150 或 250 测试敏感性。", key="bt_ma_window")
+            use_proxies = st.checkbox("启用代理资产 (Use Proxies)", help="使用 S&P500, NDX, GLD 等替代 ETF 以回测 2000 年前的数据。", key="bt_use_proxies")
+            ma_window = st.number_input("动量窗口 (MA Window)", step=10, help="默认 200 日均线。尝试 150 或 250 测试敏感性。", key="bt_ma_window")
             
         with c_adv2:
             st.markdown("**2. 阈值敏感性 (Sensitivity)**")
-            p_sahm = st.number_input("Sahm Rule", value=0.50, step=0.01, format="%.2f", key="bt_p_sahm")
-            p_vix_panic = st.number_input("VIX Panic", value=32, step=1, key="bt_p_vix_panic")
-            p_vix_rec = st.number_input("VIX Recession", value=35, step=1, key="bt_p_vix_rec")
+            p_sahm = st.number_input("Sahm Rule", step=0.01, format="%.2f", key="bt_p_sahm")
+            p_vix_panic = st.number_input("VIX Panic", step=1, key="bt_p_vix_panic")
+            p_vix_rec = st.number_input("VIX Recession", step=1, key="bt_p_vix_rec")
     
     # Construct params dict
     custom_params = {
