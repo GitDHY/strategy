@@ -244,7 +244,14 @@ def send_strategy_email(metrics, config):
     s_conf = MACRO_STATES.get(state, MACRO_STATES["NEUTRAL"])
     
     # Calculate Targets
-    targets = get_target_percentages(state, gold_bear=metrics['gold_bear'], value_regime=metrics['value_regime'], asset_trends=metrics.get('asset_trends', {}))
+    targets = get_target_percentages(
+        state, 
+        gold_bear=metrics['gold_bear'], 
+        value_regime=metrics['value_regime'], 
+        asset_trends=metrics.get('asset_trends', {}),
+        vix=metrics.get('vix'),
+        yield_curve=metrics.get('yield_curve')
+    )
     
     # Build HTML Body
     target_rows = ""
@@ -386,7 +393,7 @@ start_scheduler_service()
 
 # --- Shared Logic for Backtest & State Machine ---
 
-def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None):
+def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
     """
     Returns target asset allocation based on macro state.
     Shared by State Machine Diagnosis and Backtest.
@@ -452,6 +459,41 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
             'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
+
+    # === 🚀 新增：动态风控层 (Dynamic Risk Control) ===
+    
+    # 1. 牛市增强与预警 (Aggressive Growth in Calm Waters)
+    # 只有在“常态”下才进行激进微调
+    if s == "NEUTRAL":
+        if vix is not None:
+            # 极度平稳期 (VIX < 14)：大胆加仓，减少保险
+            if vix < 14.0:
+                boost_amt = 0.15 # 加仓 15%
+                # 从 WTMF (保险) 挪到 IWY (成长)
+                # 确保 WTMF 够扣
+                available_hedge = targets.get('WTMF', 0)
+                move_amt = min(available_hedge, boost_amt)
+                targets['WTMF'] -= move_amt
+                targets['IWY'] += move_amt
+                
+            # 早期动荡预警 (VIX > 22)：虽然没到恐慌(32)，但先跑为敬
+            elif vix > 22.0:
+                cut_amt = 0.20 # 减仓 20%
+                # 从 IWY (成长) 挪到 WTMF (保险)
+                available_growth = targets.get('IWY', 0)
+                move_amt = min(available_growth, cut_amt)
+                targets['IWY'] -= move_amt
+                targets['WTMF'] += move_amt
+
+    # 2. 债券陷阱规避 (Avoid Bond Trap)
+    # 如果处于衰退或震荡期，且收益率曲线深度倒挂，长债可能不仅不避险，反而下跌
+    if s in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"]:
+        if yield_curve is not None and yield_curve < -0.40:
+             # 削减长债/新元债，转为抗跌的 WTMF 或现金
+             if targets.get('MBH.SI', 0) > 0:
+                 move_amt = targets['MBH.SI'] * 0.5 # 砍半
+                 targets['MBH.SI'] -= move_amt
+                 targets['WTMF'] += move_amt
 
     # --- 2. Global Dynamic Trend Filter (全局动态趋势过滤) ---
     # 逻辑：除了“极度贪婪/抄底”模式外，任何资产如果处于熊市趋势（价格 < MA200），都应该被削减。
@@ -680,7 +722,9 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         if date in trend_bear_all.index:
             daily_trends = trend_bear_all.loc[date].to_dict()
         
-        targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends)
+        vix_val = row.get('VIX')
+        yc_val = row.get('YieldCurve')
+        targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends, vix=vix_val, yield_curve=yc_val)
         
         # --- Calculate Turnover (Trading Volume) ---
         # Compare current 'targets' with 'prev_targets' adjusted for drift
@@ -1246,10 +1290,10 @@ def render_factor_dashboard(metrics):
         vr = metrics['value_regime']
         st.metric("风格轮动", "Value Regime" if vr else "Growth Regime", "Tilt Value" if vr else "Tilt Growth", delta_color="off")
 
-def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None):
+def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None):
     """Renders the rebalancing table."""
     if asset_trends is None: asset_trends = {}
-    targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime, asset_trends=asset_trends)
+    targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime, asset_trends=asset_trends, vix=vix, yield_curve=yield_curve)
     
     # Add Current Holdings not in targets
     all_tickers = set(targets.keys()).union(current_holdings.keys())
@@ -1668,7 +1712,16 @@ def render_state_machine_check():
                 render_factor_dashboard(metrics)
                 
                 st.markdown("---")
-                render_rebalancing_table(metrics['state'], current_holdings, total_value, metrics['gold_bear'], metrics['value_regime'], metrics.get('asset_trends', {}))
+                render_rebalancing_table(
+                    metrics['state'], 
+                    current_holdings, 
+                    total_value, 
+                    metrics['gold_bear'], 
+                    metrics['value_regime'], 
+                    metrics.get('asset_trends', {}),
+                    vix=metrics.get('vix'),
+                    yield_curve=metrics.get('yield_curve')
+                )
                 
     render_historical_backtest_section()
 
