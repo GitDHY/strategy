@@ -406,57 +406,61 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     
     # --- 1. Base Allocation (基于宏观状态的原始配置) ---
     if s == "INFLATION_SHOCK":
-        # Rate Spike: Kill Duration, Cash is King
+        # Rate Spike: Kill Duration, Cash is King, Trend Following (WTMF)
+        # Optimized: Increased WTMF to capture trend, Removed G3B (Equity exposure)
         targets = {
-            'IWY': 0.00, 'WTMF': 0.40, 'LVHI': 0.10,
-            'G3B.SI': 0.10, 'MBH.SI': 0.00, 'GSD.SI': 0.25,
-            'SRT.SI': 0.00, 'AJBU.SI': 0.00
+            'IWY': 0.00, 'WTMF': 0.50, 'LVHI': 0.15,
+            'G3B.SI': 0.00, 'MBH.SI': 0.00, 'GSD.SI': 0.25,
+            'SRT.SI': 0.00, 'AJBU.SI': 0.10
         }
     elif s == "DEFLATION_RECESSION":
         # Recession: Long Bonds, Gold
         targets = {
-            'IWY': 0.10, 'WTMF': 0.15, 'LVHI': 0.05,
-            'G3B.SI': 0.05, 'MBH.SI': 0.35, 'GSD.SI': 0.25,
-            'SRT.SI': 0.00, 'AJBU.SI': 0.00
+            'IWY': 0.05, 'WTMF': 0.20, 'LVHI': 0.05,
+            'G3B.SI': 0.00, 'MBH.SI': 0.40, 'GSD.SI': 0.25,
+            'SRT.SI': 0.00, 'AJBU.SI': 0.05
         }
     elif s == "EXTREME_ACCUMULATION":
-        # Buy Dip (左侧交易，不进行动量过滤，因为价格通常都在均线下方)
+        # Buy Dip (左侧交易，不进行动量过滤)
         targets = {
-            'IWY': 0.70, 'WTMF': 0.00, 'LVHI': 0.00,
+            'IWY': 0.75, 'WTMF': 0.00, 'LVHI': 0.00,
             'G3B.SI': 0.10, 'MBH.SI': 0.05, 'GSD.SI': 0.05,
-            'SRT.SI': 0.06, 'AJBU.SI': 0.04
+            'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
     elif s == "CAUTIOUS_TREND":
-        # Bear Trend: Defensive
-        growth_w = 0.15
-        value_w = 0.25
+        # Bear Trend: Defensive, but use WTMF for downside protection
+        # Optimized: Increased WTMF, Reduced localized equity (G3B)
+        growth_w = 0.10
+        value_w = 0.20
         if value_regime:
-            growth_w = 0.10
-            value_w = 0.30
+            growth_w = 0.05
+            value_w = 0.25
         
         targets = {
-            'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
-            'G3B.SI': 0.20, 'MBH.SI': 0.15, 'GSD.SI': 0.10,
+            'IWY': growth_w, 'WTMF': 0.25, 'LVHI': value_w,
+            'G3B.SI': 0.10, 'MBH.SI': 0.15, 'GSD.SI': 0.10,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
     elif s == "CAUTIOUS_VOL":
         # High Vol: Hedge
+        # Optimized: Reduced Equity, Increased Crisis Alpha
         targets = {
-            'IWY': 0.40, 'WTMF': 0.20, 'LVHI': 0.10,
+            'IWY': 0.30, 'WTMF': 0.30, 'LVHI': 0.10,
             'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
     else: # NEUTRAL
         # Style Rotation
-        growth_w = 0.50
+        # Optimized: Slightly higher growth base, less drag from diversifiers
+        growth_w = 0.55
         value_w = 0.10
         if value_regime:
-            growth_w = 0.40
+            growth_w = 0.45
             value_w = 0.20
             
         targets = {
             'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
-            'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
+            'G3B.SI': 0.05, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
 
@@ -466,18 +470,20 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     # 只有在“常态”下才进行激进微调
     if s == "NEUTRAL":
         if vix is not None:
-            # 极度平稳期 (VIX < 14)：大胆加仓，减少保险
-            if vix < 14.0:
-                boost_amt = 0.15 # 加仓 15%
+            # 极度平稳期 (VIX < 13)：大胆加仓，减少保险
+            if vix < 13.0:
                 # 从 WTMF (保险) 挪到 IWY (成长)
-                # 确保 WTMF 够扣
-                available_hedge = targets.get('WTMF', 0)
-                move_amt = min(available_hedge, boost_amt)
-                targets['WTMF'] -= move_amt
-                targets['IWY'] += move_amt
+                wtmf_amt = targets.get('WTMF', 0)
+                targets['WTMF'] = 0.0
+                targets['IWY'] += wtmf_amt
                 
-            # 早期动荡预警 (VIX > 22)：虽然没到恐慌(32)，但先跑为敬
-            elif vix > 22.0:
+                # 若还不够激进，可适当减少低效债券 (MBH)
+                mbh_amt = targets.get('MBH.SI', 0) * 0.5
+                targets['MBH.SI'] -= mbh_amt
+                targets['IWY'] += mbh_amt
+                
+            # 早期动荡预警 (VIX > 20)：虽然没到恐慌(32)，但先跑为敬
+            elif vix > 20.0:
                 cut_amt = 0.20 # 减仓 20%
                 # 从 IWY (成长) 挪到 WTMF (保险)
                 available_growth = targets.get('IWY', 0)
@@ -488,10 +494,10 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     # 2. 债券陷阱规避 (Avoid Bond Trap)
     # 如果处于衰退或震荡期，且收益率曲线深度倒挂，长债可能不仅不避险，反而下跌
     if s in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"]:
-        if yield_curve is not None and yield_curve < -0.40:
+        if yield_curve is not None and yield_curve < -0.30:
              # 削减长债/新元债，转为抗跌的 WTMF 或现金
              if targets.get('MBH.SI', 0) > 0:
-                 move_amt = targets['MBH.SI'] * 0.5 # 砍半
+                 move_amt = targets['MBH.SI'] * 0.7 # 大幅削减
                  targets['MBH.SI'] -= move_amt
                  targets['WTMF'] += move_amt
 
@@ -527,15 +533,19 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     # 如果处于非抄底模式，且核心资产 IWY 破位，必须大幅降低风险
     if s != "EXTREME_ACCUMULATION" and targets.get('IWY', 0) > 0:
         if asset_trends.get('IWY', False): # IWY is Bearish
-            # 削减一半 IWY 仓位，移至 WTMF
-            cut_amount = targets['IWY'] * 0.5
+            # 如果 VIX 高，说明是恐慌性下跌，砍得更狠
+            severity = 0.5
+            if vix is not None and vix > 25:
+                severity = 0.8
+                
+            cut_amount = targets['IWY'] * severity
             targets['IWY'] -= cut_amount
             targets['WTMF'] += cut_amount
 
     # --- 4. Gold Trend Filter (Legacy) ---
     # 保留原有的黄金独立判断，作为最后一道防线
     if gold_bear and targets.get('GSD.SI', 0) > 0:
-        cut_amount = targets['GSD.SI'] * 0.5
+        cut_amount = targets['GSD.SI'] # 直接清仓
         targets['GSD.SI'] -= cut_amount
         targets['WTMF'] += cut_amount
     
@@ -947,7 +957,9 @@ def determine_macro_state(row):
         return "DEFLATION_RECESSION"
     elif is_f and not is_shock and not is_rec:
         return "EXTREME_ACCUMULATION"
-    elif is_down and not is_vol_elevated:
+    elif is_down:
+        # Optimized: If Trend is Down, prioritize Trend signal (Defensive) over Volatility signal.
+        # This prevents holding excessive equity (via Cautious Vol) during a Volatile Bear market.
         return "CAUTIOUS_TREND"
     elif is_vol_elevated:
         return "CAUTIOUS_VOL"
