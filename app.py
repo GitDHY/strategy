@@ -72,80 +72,98 @@ def fetch_fred_data(series_id):
     1. Fresh Local File (modified today): Use directly.
     2. Network Fetch: Download and save to local (fred_{series_id}.csv), then use.
     3. Stale Local File: Fallback if network fails.
+    
+    改进：
+    - 更详细的错误信息（状态码、异常原因 + 返回体预览）。
+    - 增加 http 备份 URL，兼容部分 TLS 拦截/证书问题的网络。
+    - 增加 Accept 头，避免被判为机器人流量。
+    - 当日文件支持多路径/多命名 (fred_{id}.csv 或 {id}.csv)，避免手动下载后未被识别。
     """
-    # Canonical path for saving/reading (priority)
-    file_name = f"fred_{series_id}.csv"
     base_dir = os.path.dirname(__file__)
-    target_path = os.path.join(base_dir, file_name)
+    file_name = f"fred_{series_id}.csv"
+    alt_name = f"{series_id}.csv"
+    candidates = [
+        os.path.join(base_dir, file_name),
+        os.path.join(os.getcwd(), file_name),
+        os.path.join(base_dir, alt_name),
+        os.path.join(os.getcwd(), alt_name),
+        os.path.join(base_dir, "data", file_name),
+        os.path.join(base_dir, "data", alt_name),
+    ]
+    candidates = list(dict.fromkeys(candidates))
+    target_path = candidates[0]
     
-    # 1. Check if we have a fresh local file (modified today)
-    if os.path.exists(target_path):
-        try:
-            mtime = datetime.date.fromtimestamp(os.path.getmtime(target_path))
-            if mtime == datetime.date.today():
-                df = pd.read_csv(target_path, parse_dates=['observation_date'], index_col='observation_date')
-                df.columns = [series_id]
-                return df
-        except Exception as e:
-            print(f"Error reading fresh local file {target_path}: {e}")
-
-    # 2. Network Fetch (if no fresh local file)
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    # 1) 当日本地缓存（识别手动下载的两种命名）
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                mtime = datetime.date.fromtimestamp(os.path.getmtime(path))
+                if mtime == datetime.date.today():
+                    df = pd.read_csv(path, parse_dates=['observation_date'], index_col='observation_date')
+                    df.columns = [series_id]
+                    return df
+            except Exception as e:
+                print(f"Error reading fresh local file {path}: {e}")
+    
+    # 2) 网络下载（含 https -> http 备份）
+    urls = [
+        f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}",
+        f"http://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}",
+    ]
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/csv,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Connection": "close",
     }
-    
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Increased timeout to 30s, verify=False for stability
-            response = requests.get(url, headers=headers, timeout=30, verify=False)
-            response.raise_for_status()
-            content = response.content.decode('utf-8')
-            
-            # Save/Update local cache file
+    last_err = None
+    for attempt in range(3):
+        for url in urls:
             try:
-                with open(target_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                resp = requests.get(url, headers=headers, timeout=30, verify=False, allow_redirects=True)
+                status = resp.status_code
+                preview = resp.text[:200] if resp is not None else ""
+                if status != 200:
+                    raise RuntimeError(f"HTTP {status}, preview: {preview}")
+                content = resp.content.decode('utf-8', errors='ignore')
+                lower_head = content[:200].lower()
+                if "<html" in lower_head or "<!doctype" in lower_head:
+                    raise RuntimeError(f"HTML page returned, preview: {content[:200]}")
+                if 'observation_date' not in content:
+                    raise RuntimeError(f"Missing observation_date, preview: {content[:200]}")
+                if len(content) < 50:
+                    raise RuntimeError(f"Empty/short content (len={len(content)}), preview: {content[:200]}")
+                try:
+                    with open(target_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                except Exception as e:
+                    print(f"Failed to write cache file: {e}")
+                df = pd.read_csv(io.StringIO(content), parse_dates=['observation_date'], index_col='observation_date')
+                df.columns = [series_id]
+                return df
             except Exception as e:
-                print(f"Failed to write cache file: {e}")
-
-            df = pd.read_csv(io.StringIO(content), parse_dates=['observation_date'], index_col='observation_date')
-            df.columns = [series_id]
-            # st.toast(f"已自动更新: {series_id}", icon="cloud_done")
-            return df
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(1) 
+                last_err = f"{url} -> {e}"
                 continue
-            print(f"Error fetching FRED data ({series_id}): {e}")
-
-    # 3. Fallback: Use any local file (even if old)
-    candidates = [
-        target_path,
-        os.path.join(os.getcwd(), f"fred_{series_id}.csv"),
-        os.path.join(os.path.dirname(__file__), f"{series_id}.csv"),
-        os.path.join(os.getcwd(), f"{series_id}.csv"),
-    ]
-    # Remove duplicates
-    candidates = list(dict.fromkeys(candidates))
+        time.sleep(1)
     
+    if last_err:
+        print(f"Error fetching FRED data ({series_id}): {last_err}")
+        st.warning(f"⚠️ 自动下载 FRED 数据失败 ({series_id})。错误: {last_err}\n\n**解决方法**：1) 检查网络/代理，2) 可手动下载并放入程序目录 (fred_{series_id}.csv 或 {series_id}.csv)。")
+
+    # 3) 兜底使用本地旧文件
     for local_file in candidates:
         if os.path.exists(local_file):
             try:
                 df = pd.read_csv(local_file, parse_dates=['observation_date'], index_col='observation_date')
                 df.columns = [series_id]
-                
                 file_date = datetime.date.fromtimestamp(os.path.getmtime(local_file))
                 st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id})。已使用本地历史数据 (日期: {file_date})。\n\n**解决方法**：请检查网络，或手动更新数据。")
                 return df
-            except Exception as e:
+            except Exception:
                 continue
 
-    # 4. Final Failure
     st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id}) 且无本地备份。\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件。")
     return pd.DataFrame()
 
@@ -297,8 +315,17 @@ def analyze_market_state_logic():
     return True, metrics
 
 def send_strategy_email(metrics, config):
-    """Sends an email with the strategy analysis."""
-    if not config.get("email_to") or not config.get("email_from"):
+    """发送策略分析邮件，返回 (success, message)。"""
+    email_to = str(config.get("email_to", "")).strip()
+    email_from = str(config.get("email_from", "")).strip()
+    email_pwd = config.get("email_pwd", "")
+    smtp_server = str(config.get("smtp_server", "smtp.gmail.com")).strip() or "smtp.gmail.com"
+    try:
+        smtp_port = int(config.get("smtp_port", 587))
+    except Exception:
+        smtp_port = 587
+
+    if not email_to or not email_from or not email_pwd:
         return False, "邮箱配置不完整"
 
     state = metrics['state']
@@ -314,11 +341,11 @@ def send_strategy_email(metrics, config):
         yield_curve=metrics.get('yield_curve')
     )
     
-    # Build HTML Body
+    # Build Target Table
     target_rows = ""
     for t, w in targets.items():
         if w > 0:
-            target_rows += f"<tr><td>{ASSET_NAMES.get(t, t)}</td><td>{t}</td><td><b>{w*100:.1f}%</b></td></tr>"
+            target_rows += f"<tr><td>{ASSET_NAMES.get(t, t)}</td><td style='color:#555'>{t}</td><td><b>{w*100:.1f}%</b></td></tr>"
 
     # Get Adjustment Reasons
     adjustments = get_adjustment_reasons(
@@ -334,57 +361,70 @@ def send_strategy_email(metrics, config):
     if adjustments:
         adj_list = "".join([f"<li>{r}</li>" for r in adjustments])
         adj_html = f"""
-        <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">🔧 动态风控触发 (Active Adjustments)</h3>
-        <ul style="line-height: 1.6; color: #d93025;">
-            {adj_list}
-        </ul>
+        <div style="background:#fff6f2;border:1px solid #ffd7c2;border-radius:10px;padding:14px 16px;margin:12px 0;">
+            <div style="font-weight:600;color:#d93025;margin-bottom:6px;">🔧 动态风控触发</div>
+            <ul style="line-height:1.6;margin:0;color:#b23c17;">{adj_list}</ul>
+        </div>
         """
+    else:
+        adj_html = """
+        <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:10px;padding:14px 16px;margin:12px 0;">
+            <div style="font-weight:600;color:#237804;">✅ 当前未触发额外风控</div>
+        </div>
+        """
+
+    # Quick summary pills
+    yc_val = metrics.get('yield_curve', 0)
+    summary_points = [
+        f"状态: {s_conf['display']}",
+        f"VIX {metrics['vix']:.1f} ({'⚠️ 高波动' if metrics['fear'] else '✅ 正常'})",
+        f"10Y-2Y {yc_val:.2f}% ({'⚠️ 倒挂/解倒挂' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})",
+        f"Sahm {metrics['sahm']:.2f} ({'⚠️ 衰退信号' if metrics['recession'] else '✅ 未触发'})"
+    ]
+    summary_html = "".join([f"<span style='display:inline-block;background:#f0f4ff;color:#1a73e8;padding:6px 10px;border-radius:20px;margin:4px 4px 0 0;font-size:13px;'>{p}</span>" for p in summary_points])
 
     html_content = f"""
     <html>
-    <body style="font-family: Arial, sans-serif; color: #333;">
-        <div style="max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
-            <div style="background-color: {s_conf['bg_color']}; padding: 20px; border-bottom: 5px solid {s_conf['border_color']};">
-                <h2 style="margin: 0; color: #202124;">{s_conf['icon']} 宏观策略日报</h2>
-                <p style="margin: 5px 0 0 0; opacity: 0.8;">{metrics['date']} | 状态更新</p>
+    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; background:#f7f8fa;">
+        <div style="max-width: 680px; margin: 24px auto; background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,0.05);">
+            <div style="padding:22px 24px; background: linear-gradient(135deg, {s_conf['border_color']} 0%, #1f1f1f 100%); color:#fff;">
+                <div style="font-size:13px; opacity:0.85;">{metrics['date']}</div>
+                <h2 style="margin:6px 0 4px 0; font-weight:700; letter-spacing:0.3px;">{s_conf['icon']} 宏观策略快报</h2>
+                <div style="opacity:0.9; line-height:1.5; font-size:14px;">{s_conf['desc']}</div>
             </div>
-            
-            <div style="padding: 20px;">
-                <div style="padding: 15px; background-color: #f8f9fa; border-radius: 6px; margin-bottom: 20px;">
-                    <h3 style="margin-top: 0; color: {s_conf['border_color']};">当前状态: {s_conf['display']}</h3>
-                    <p style="margin-bottom: 0; line-height: 1.5;">{s_conf['desc']}</p>
-                </div>
-                
-                <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">📈 核心指标 (Key Metrics)</h3>
-                <ul style="line-height: 1.6;">
-                    <li><b>利率冲击 (Rate Shock):</b> {metrics['tnx_roc']:.1%} <span style="color: {'red' if metrics['rate_shock'] else 'green'};">({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</span></li>
-                    <li><b>衰退信号 (Sahm Rule):</b> {metrics['sahm']:.2f} <span style="color: {'red' if metrics['recession'] else 'green'};">({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</span></li>
-                    <li><b>恐慌指数 (VIX):</b> {metrics['vix']:.1f} <span style="color: {'orange' if metrics['fear'] else 'green'};">({'⚠️ 恐慌' if metrics['fear'] else '✅ 正常'})</span></li>
-                    <li><b>股债相关性 (Corr):</b> {metrics['corr']:.2f} <span style="color: {'red' if metrics['corr_broken'] else 'green'};">({'⚠️ 失效' if metrics['corr_broken'] else '✅ 正常'})</span></li>
-                </ul>
 
-                <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">🎯 战术微调 (Tactical)</h3>
-                <ul style="line-height: 1.6;">
-                    <li><b>黄金趋势:</b> {'🐻 Bearish (回避)' if metrics['gold_bear'] else '🐂 Bullish (持有)'}</li>
-                    <li><b>风格轮动:</b> {'🧱 Value (价值优先)' if metrics['value_regime'] else '🚀 Growth (成长优先)'}</li>
-                    <li><b>收益率曲线 (10Y-2Y):</b> {metrics.get('yield_curve', 0):.2f}% ({'⚠️ 倒挂/解倒挂' if (metrics.get('yield_curve', 0) < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})</li>
+            <div style="padding:22px 24px;">
+                <div style="margin-bottom:12px;">{summary_html}</div>
+
+                <h3 style="margin:18px 0 10px 0; font-size:16px;">📈 核心指标 (Key Metrics)</h3>
+                <table style="width:100%; border-collapse:separate; border-spacing:0 8px; font-size:14px;">
+                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">利率冲击</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['rate_shock'] else '#15803d'};">{metrics['tnx_roc']:.1%} ({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</td></tr>
+                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">Sahm Rule</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['recession'] else '#15803d'};">{metrics['sahm']:.2f} ({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</td></tr>
+                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">VIX</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#ea580c' if metrics['fear'] else '#15803d'};">{metrics['vix']:.1f} ({'⚠️ 恐慌' if metrics['fear'] else '✅ 正常'})</td></tr>
+                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">股债相关性</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['corr_broken'] else '#15803d'};">{metrics['corr']:.2f} ({'⚠️ 失效' if metrics['corr_broken'] else '✅ 正常'})</td></tr>
+                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">收益率曲线 (10Y-2Y)</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '#15803d'};">{yc_val:.2f}%</td></tr>
+                </table>
+
+                <h3 style="margin:20px 0 10px 0; font-size:16px;">🎯 战术概览 (Tactical)</h3>
+                <ul style="line-height:1.6; margin-top:6px; padding-left:18px; color:#374151;">
+                    <li><b>黄金趋势:</b> {'🐻 回避' if metrics['gold_bear'] else '🐂 持有/增配'}</li>
+                    <li><b>风格轮动:</b> {'🧱 Value 价值占优' if metrics['value_regime'] else '🚀 Growth 成长占优'}</li>
                 </ul>
 
                 {adj_html}
-                
-                <h3 style="border-bottom: 2px solid #f0f0f0; padding-bottom: 8px;">📊 建议配置 (Target Allocation)</h3>
-                <table border="0" cellpadding="8" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                    <tr style="background-color: #f2f2f2; text-align: left;">
-                        <th style="border-bottom: 2px solid #ddd;">资产名称</th>
-                        <th style="border-bottom: 2px solid #ddd;">代码</th>
-                        <th style="border-bottom: 2px solid #ddd;">目标仓位</th>
+
+                <h3 style="margin:20px 0 10px 0; font-size:16px;">📊 建议配置 (Target Allocation)</h3>
+                <table border="0" cellpadding="10" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-top: 8px; font-size:14px;">
+                    <tr style="background-color: #f3f4f6; text-align: left;">
+                        <th style="border-bottom: 2px solid #e5e7eb;">资产名称</th>
+                        <th style="border-bottom: 2px solid #e5e7eb;">代码</th>
+                        <th style="border-bottom: 2px solid #e5e7eb;">目标仓位</th>
                     </tr>
                     {target_rows}
                 </table>
-                
-                <p style="font-size: 12px; color: #999; margin-top: 30px; text-align: center; border-top: 1px solid #eee; padding-top: 10px;">
-                    此邮件由 Stock Strategy Analyzer 自动生成。<br>
-                    投资有风险，决策需谨慎。
+
+                <p style="font-size: 12px; color: #6b7280; margin-top: 26px; text-align: center; border-top: 1px solid #e5e7eb; padding-top: 10px;">
+                    此邮件由 Stock Strategy Analyzer 自动生成，供参考，不构成投资建议。
                 </p>
             </div>
         </div>
@@ -393,15 +433,15 @@ def send_strategy_email(metrics, config):
     """
     
     msg = MIMEMultipart()
-    msg['From'] = config['email_from']
-    msg['To'] = config['email_to']
+    msg['From'] = email_from
+    msg['To'] = email_to
     msg['Subject'] = f"[{state}] 宏观策略状态更新 - {metrics['date']}"
     msg.attach(MIMEText(html_content, 'html'))
     
     try:
-        server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
+        server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
-        server.login(config['email_from'], config['email_pwd'])
+        server.login(email_from, email_pwd)
         server.send_message(msg)
         server.quit()
         return True, "邮件发送成功"
@@ -1899,13 +1939,52 @@ def render_alert_config_ui():
         
         config = load_alert_config()
         
+        # Current snapshot for status cards
+        email_to_saved = str(config.get("email_to", "")).strip()
+        email_from_saved = str(config.get("email_from", "")).strip()
+        email_ready = bool(email_to_saved and email_from_saved and config.get("email_pwd"))
+        enabled_saved = bool(config.get("enabled", False))
+        freq_saved = str(config.get("frequency", "Manual"))
+        time_str_saved = str(config.get("trigger_time", "09:00"))
+        try:
+            trigger_time_saved = datetime.datetime.strptime(time_str_saved, "%H:%M").time()
+        except Exception:
+            trigger_time_saved = datetime.time(9, 0)
+
+        def _next_run_preview(freq: str, trig_time: datetime.time):
+            if freq not in ["Daily", "Weekly"]:
+                return "手动触发"
+            now = datetime.datetime.now()
+            today_trigger = datetime.datetime.combine(now.date(), trig_time)
+            if freq == "Daily":
+                nxt = today_trigger if now < today_trigger else today_trigger + datetime.timedelta(days=1)
+            else:  # Weekly (Monday)
+                days_ahead = (0 - now.weekday()) % 7
+                if days_ahead == 0 and now >= today_trigger:
+                    days_ahead = 7
+                nxt = today_trigger + datetime.timedelta(days=days_ahead)
+            return nxt.strftime("%Y-%m-%d %H:%M")
+
+        next_run_preview = _next_run_preview(freq_saved, trigger_time_saved)
+        status_color = "🟢 已启用" if (enabled_saved and email_ready) else ("🟡 待补全" if enabled_saved else "⚪ 未启用")
+
+        c_status, c_next, c_last = st.columns(3)
+        with c_status:
+            st.metric("当前状态", status_color, help="需要同时开启开关并填写邮件信息。")
+        with c_next:
+            st.metric("下次触发", next_run_preview)
+        with c_last:
+            st.metric("上次运行", config.get("last_run", "Never"))
+
+        st.divider()
+
         with st.form("alert_config_form"):
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("📧 邮件配置 (Email)")
-                email_to = st.text_input("接收邮箱 (To)", value=config.get("email_to", ""), placeholder="you@example.com")
-                email_from = st.text_input("发送邮箱 (From)", value=config.get("email_from", ""), placeholder="sender@gmail.com")
-                email_pwd = st.text_input("授权码/密码 (App Password)", value=config.get("email_pwd", ""), type="password", help="对于 Gmail/Outlook，请使用生成的应用专用密码 (App Password)")
+                email_to = st.text_input("接收邮箱 (To)", value=email_to_saved, placeholder="you@example.com")
+                email_from = st.text_input("发送邮箱 (From)", value=email_from_saved, placeholder="sender@gmail.com")
+                email_pwd = st.text_input("授权码/密码 (App Password)", value=str(config.get("email_pwd", "")), type="password", help="Gmail/Outlook 请使用应用专用密码，避免使用真实登录密码。")
                 
                 c1a, c1b = st.columns(2)
                 with c1a:
@@ -1918,56 +1997,56 @@ def render_alert_config_ui():
             
             with c2:
                 st.subheader("⏰ 触发规则 (Trigger)")
-                enabled = st.checkbox("启用自动提醒 (Enable)", value=bool(config.get("enabled", False)))
+                enabled = st.checkbox("启用自动提醒 (Enable)", value=enabled_saved)
                 
-                curr_freq = str(config.get("frequency", "Manual"))
-                freq_opts = ["Manual", "Daily", "Weekly"]
-                if curr_freq not in freq_opts: curr_freq = "Manual"
-                frequency = st.selectbox("触发频率", freq_opts, index=freq_opts.index(curr_freq))
+                curr_freq = freq_saved if freq_saved in ["Manual", "Daily", "Weekly"] else "Manual"
+                frequency = st.selectbox("触发频率", ["Manual", "Daily", "Weekly"], index=["Manual", "Daily", "Weekly"].index(curr_freq))
                 
-                time_str = str(config.get("trigger_time", "09:00"))
+                time_str = time_str_saved
                 try:
                     time_obj = datetime.datetime.strptime(time_str, "%H:%M").time()
-                except:
+                except Exception:
                     time_obj = datetime.time(9, 0)
                 trigger_time = st.time_input("触发时间 (Local Time)", value=time_obj)
                 
-                st.info(f"上次运行: {config.get('last_run', 'Never')}")
-                st.markdown("""
-                **注意**: 
-                1. 只有当应用在运行状态 (网页开启或后台脚本运行) 时才会触发。
-                2. 建议设置为每日开盘前 (如 09:00)。
-                """)
+                st.info("仅在应用运行时触发；建议设为开盘前 (如 09:00)。")
 
             if st.form_submit_button("💾 保存配置"):
-                new_config = {
-                    "enabled": enabled,
-                    "email_to": email_to,
-                    "email_from": email_from,
-                    "email_pwd": email_pwd,
-                    "smtp_server": smtp_server,
-                    "smtp_port": smtp_port,
-                    "frequency": frequency,
-                    "trigger_time": trigger_time.strftime("%H:%M"),
-                    "last_run": config.get("last_run", "")
-                }
-                save_alert_config(new_config)
-                st.success("配置已保存!")
-                st.rerun()
+                email_ready_form = bool(email_to.strip() and email_from.strip() and email_pwd)
+                if enabled and not email_ready_form:
+                    st.error("启用自动提醒需要填写收件人、发件人和授权码。")
+                else:
+                    new_config = {
+                        "enabled": enabled,
+                        "email_to": email_to.strip(),
+                        "email_from": email_from.strip(),
+                        "email_pwd": email_pwd,
+                        "smtp_server": smtp_server.strip() or "smtp.gmail.com",
+                        "smtp_port": smtp_port,
+                        "frequency": frequency,
+                        "trigger_time": trigger_time.strftime("%H:%M"),
+                        "last_run": config.get("last_run", "")
+                    }
+                    save_alert_config(new_config)
+                    st.success("配置已保存!")
+                    st.rerun()
 
         # Test Button
         if st.button("📨 立即发送测试邮件 (Send Test Email)", type="secondary"):
             with st.spinner("正在分析并发送..."):
                 cfg = load_alert_config()
-                success, res = analyze_market_state_logic()
-                if success:
-                    ok, msg = send_strategy_email(res, cfg)
-                    if ok:
-                        st.success(f"✅ 发送成功! 请检查邮箱: {cfg['email_to']}")
-                    else:
-                        st.error(f"❌ 发送失败: {msg}")
+                if cfg.get("enabled") and (not cfg.get("email_to") or not cfg.get("email_from") or not cfg.get("email_pwd")):
+                    st.error("请先补全邮箱配置后再测试发送。")
                 else:
-                    st.error(f"❌ 分析失败: {res}")
+                    success, res = analyze_market_state_logic()
+                    if success:
+                        ok, msg = send_strategy_email(res, cfg)
+                        if ok:
+                            st.success(f"✅ 发送成功! 请检查邮箱: {cfg['email_to']}")
+                        else:
+                            st.error(f"❌ 发送失败: {msg}")
+                    else:
+                        st.error(f"❌ 分析失败: {res}")
 
 def render_state_machine_check():
     st.header("🛡️ 宏观状态机与资产配置 (Macro State & Allocation)")
