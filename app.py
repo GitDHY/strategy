@@ -67,15 +67,65 @@ def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=
 # Removed cache for debugging connection issues
 def fetch_fred_data(series_id):
     """
-    Robust fetch for FRED data using requests with User-Agent.
+    Robust fetch for FRED data with Auto-Update & Caching logic.
     Priority:
-    1. Local file (fred_{series_id}.csv or {series_id}.csv) in app dir or CWD
-    2. Network fetch (fred.stlouisfed.org)
+    1. Fresh Local File (modified today): Use directly.
+    2. Network Fetch: Download and save to local (fred_{series_id}.csv), then use.
+    3. Stale Local File: Fallback if network fails.
     """
-    # 1. Check local file override
-    # Define search candidates
+    # Canonical path for saving/reading (priority)
+    file_name = f"fred_{series_id}.csv"
+    base_dir = os.path.dirname(__file__)
+    target_path = os.path.join(base_dir, file_name)
+    
+    # 1. Check if we have a fresh local file (modified today)
+    if os.path.exists(target_path):
+        try:
+            mtime = datetime.date.fromtimestamp(os.path.getmtime(target_path))
+            if mtime == datetime.date.today():
+                df = pd.read_csv(target_path, parse_dates=['observation_date'], index_col='observation_date')
+                df.columns = [series_id]
+                return df
+        except Exception as e:
+            print(f"Error reading fresh local file {target_path}: {e}")
+
+    # 2. Network Fetch (if no fresh local file)
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Increased timeout to 30s, verify=False for stability
+            response = requests.get(url, headers=headers, timeout=30, verify=False)
+            response.raise_for_status()
+            content = response.content.decode('utf-8')
+            
+            # Save/Update local cache file
+            try:
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                print(f"Failed to write cache file: {e}")
+
+            df = pd.read_csv(io.StringIO(content), parse_dates=['observation_date'], index_col='observation_date')
+            df.columns = [series_id]
+            # st.toast(f"已自动更新: {series_id}", icon="cloud_done")
+            return df
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(1) 
+                continue
+            print(f"Error fetching FRED data ({series_id}): {e}")
+
+    # 3. Fallback: Use any local file (even if old)
     candidates = [
-        os.path.join(os.path.dirname(__file__), f"fred_{series_id}.csv"),
+        target_path,
         os.path.join(os.getcwd(), f"fred_{series_id}.csv"),
         os.path.join(os.path.dirname(__file__), f"{series_id}.csv"),
         os.path.join(os.getcwd(), f"{series_id}.csv"),
@@ -88,47 +138,16 @@ def fetch_fred_data(series_id):
             try:
                 df = pd.read_csv(local_file, parse_dates=['observation_date'], index_col='observation_date')
                 df.columns = [series_id]
-                # st.toast(f"Using local file for {series_id}", icon="📂") # Optional toast
+                
+                file_date = datetime.date.fromtimestamp(os.path.getmtime(local_file))
+                st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id})。已使用本地历史数据 (日期: {file_date})。\n\n**解决方法**：请检查网络，或手动更新数据。")
                 return df
             except Exception as e:
-                st.warning(f"Found local file {local_file} but failed to read: {e}")
-                # Continue to try network or other files? 
-                # If we found a file but failed to read, it's likely the intended file. 
-                # But let's fallback to network just in case.
-
-    # 2. Network Fetch
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    import time
-    
-    # Retry logic
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Added verify=False to bypass SSL errors (common in some networks)
-            # Suppress warnings for verify=False
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            # Increased timeout to 30s
-            response = requests.get(url, headers=headers, timeout=30, verify=False)
-            response.raise_for_status()
-            content = response.content.decode('utf-8')
-            df = pd.read_csv(io.StringIO(content), parse_dates=['observation_date'], index_col='observation_date')
-            df.columns = [series_id]
-            return df
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(1) # Wait 1s before retry
                 continue
-            
-            # Show friendly warning instead of error
-            st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id})。网络连接被切断。\n\n**尝试寻找的本地路径**:\n{candidates}\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件即可恢复正常。")
-            print(f"Error fetching FRED data ({series_id}): {e}")
-            # Return empty DataFrame on failure
-            return pd.DataFrame()
+
+    # 4. Final Failure
+    st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id}) 且无本地备份。\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件。")
+    return pd.DataFrame()
 
 
 
