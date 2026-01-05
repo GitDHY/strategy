@@ -65,7 +65,7 @@ def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=
     return reasons
 
 # Removed cache for debugging connection issues
-def fetch_fred_data(series_id):
+def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
     """
     Robust fetch for FRED data with Auto-Update & Caching logic.
     Priority:
@@ -78,6 +78,7 @@ def fetch_fred_data(series_id):
     - 增加 http 备份 URL，兼容部分 TLS 拦截/证书问题的网络。
     - 增加 Accept 头，避免被判为机器人流量。
     - 当日文件支持多路径/多命名 (fred_{id}.csv 或 {id}.csv)，避免手动下载后未被识别。
+    - 缩短 UI 等待时间：默认 2 次尝试，每次超时 10 秒，避免前端卡顿。
     """
     base_dir = os.path.dirname(__file__)
     file_name = f"fred_{series_id}.csv"
@@ -119,10 +120,10 @@ def fetch_fred_data(series_id):
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     last_err = None
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         for url in urls:
             try:
-                resp = requests.get(url, headers=headers, timeout=30, verify=False, allow_redirects=True)
+                resp = requests.get(url, headers=headers, timeout=timeout_sec, verify=False, allow_redirects=True)
                 status = resp.status_code
                 preview = resp.text[:200] if resp is not None else ""
                 if status != 200:
@@ -208,7 +209,7 @@ def load_alert_config():
             "smtp_server": "smtp.gmail.com",
             "smtp_port": 587,
             "frequency": "Manual", # Manual, Daily, Weekly
-            "trigger_time": "09:00",
+            "trigger_time": "09:30",  # Singapore Time (UTC+8)
             "last_run": ""
         }
     try:
@@ -220,6 +221,50 @@ def load_alert_config():
 def save_alert_config(config):
     with open(ALERT_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
+
+
+# --- Idempotent Daily Lock to Prevent Duplicate Sends ---
+LOCK_DIR = os.path.join(os.path.dirname(__file__), ".locks")
+
+
+def _ensure_lock_dir():
+    try:
+        os.makedirs(LOCK_DIR, exist_ok=True)
+    except Exception as e:
+        print(f"[Lock] Failed to ensure lock dir: {e}")
+
+
+def acquire_daily_lock(date_str: str, ttl_minutes: int = 120) -> bool:
+    """Create a dated lock file to avoid duplicate daily sends.
+    Returns True if lock acquired; False if an unexpired lock already exists."""
+    _ensure_lock_dir()
+    lock_path = os.path.join(LOCK_DIR, f"alert_{date_str}.lock")
+    now_ts = time.time()
+    if os.path.exists(lock_path):
+        try:
+            with open(lock_path, "r") as f:
+                ts = float(f.read().strip() or "0")
+            if now_ts - ts < ttl_minutes * 60:
+                return False
+        except Exception:
+            # If reading fails, overwrite to be safe
+            pass
+    try:
+        with open(lock_path, "w") as f:
+            f.write(str(now_ts))
+    except Exception as e:
+        print(f"[Lock] Failed to write lock file: {e}")
+    return True
+
+
+def release_daily_lock(date_str: str):
+    """Optional: remove the lock file for the given date."""
+    lock_path = os.path.join(LOCK_DIR, f"alert_{date_str}.lock")
+    try:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+    except Exception as e:
+        print(f"[Lock] Failed to release lock: {e}")
 
 def analyze_market_state_logic():
     """
@@ -462,8 +507,9 @@ def start_scheduler_service():
         while True:
             cfg = load_alert_config()
             if cfg.get("enabled", False) and cfg.get("frequency") != "Manual":
-                now = datetime.datetime.now()
-                trigger_hm = cfg.get("trigger_time", "09:00")
+                sg_tz = datetime.timezone(datetime.timedelta(hours=8))
+                now = datetime.datetime.now(sg_tz)
+                trigger_hm = cfg.get("trigger_time", "09:30")
                 last_run_str = cfg.get("last_run", "")
                 
                 should_run = False
@@ -471,10 +517,10 @@ def start_scheduler_service():
                 
                 # Simple check: Is it past trigger time AND haven't run today?
                 try:
-                    trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M")
+                    trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M").replace(tzinfo=sg_tz)
                 except:
                     # Fallback if time parse fails
-                    trigger_dt = datetime.datetime.strptime(f"{today_str} 09:00", "%Y-%m-%d %H:%M")
+                    trigger_dt = datetime.datetime.strptime(f"{today_str} 09:30", "%Y-%m-%d %H:%M").replace(tzinfo=sg_tz)
                 
                 if now >= trigger_dt:
                     # Check frequency
@@ -487,21 +533,23 @@ def start_scheduler_service():
                             should_run = True
                 
                 if should_run:
-                    print(f"[Scheduler] Triggering auto-analysis at {now}")
-                    success, res = analyze_market_state_logic()
-                    if success:
-                        email_ok, msg = send_strategy_email(res, cfg)
-                        if email_ok:
-                            print(f"[Scheduler] Email sent: {msg}")
-                            # Critical: Reload config to avoid race conditions (minimal)
-                            # But we are single thread now, so safe.
-                            cfg = load_alert_config() 
-                            cfg["last_run"] = today_str
-                            save_alert_config(cfg)
-                        else:
-                            print(f"[Scheduler] Email failed: {msg}")
+                    # Idempotent guard: prevent duplicate sends across threads/processes
+                    if not acquire_daily_lock(today_str, ttl_minutes=120):
+                        print(f"[Scheduler] Skip duplicate send for {today_str} (lock exists).")
                     else:
-                        print(f"[Scheduler] Analysis failed: {res}")
+                        print(f"[Scheduler] Triggering auto-analysis at {now}")
+                        success, res = analyze_market_state_logic()
+                        if success:
+                            email_ok, msg = send_strategy_email(res, cfg)
+                            if email_ok:
+                                print(f"[Scheduler] Email sent: {msg}")
+                                cfg = load_alert_config()
+                                cfg["last_run"] = today_str
+                                save_alert_config(cfg)
+                            else:
+                                print(f"[Scheduler] Email failed: {msg}")
+                        else:
+                            print(f"[Scheduler] Analysis failed: {res}")
             
             time.sleep(60) # Check every minute
 
@@ -1945,17 +1993,18 @@ def render_alert_config_ui():
         email_ready = bool(email_to_saved and email_from_saved and config.get("email_pwd"))
         enabled_saved = bool(config.get("enabled", False))
         freq_saved = str(config.get("frequency", "Manual"))
-        time_str_saved = str(config.get("trigger_time", "09:00"))
+        time_str_saved = str(config.get("trigger_time", "09:30"))
         try:
             trigger_time_saved = datetime.datetime.strptime(time_str_saved, "%H:%M").time()
         except Exception:
-            trigger_time_saved = datetime.time(9, 0)
+            trigger_time_saved = datetime.time(9, 30)
 
         def _next_run_preview(freq: str, trig_time: datetime.time):
             if freq not in ["Daily", "Weekly"]:
                 return "手动触发"
-            now = datetime.datetime.now()
-            today_trigger = datetime.datetime.combine(now.date(), trig_time)
+            sg_tz = datetime.timezone(datetime.timedelta(hours=8))
+            now = datetime.datetime.now(sg_tz)
+            today_trigger = datetime.datetime.combine(now.date(), trig_time, tzinfo=sg_tz)
             if freq == "Daily":
                 nxt = today_trigger if now < today_trigger else today_trigger + datetime.timedelta(days=1)
             else:  # Weekly (Monday)
@@ -2006,10 +2055,10 @@ def render_alert_config_ui():
                 try:
                     time_obj = datetime.datetime.strptime(time_str, "%H:%M").time()
                 except Exception:
-                    time_obj = datetime.time(9, 0)
+                    time_obj = datetime.time(9, 30)
                 trigger_time = st.time_input("触发时间 (Local Time)", value=time_obj)
                 
-                st.info("仅在应用运行时触发；建议设为开盘前 (如 09:00)。")
+                st.info("仅在应用运行时触发；默认新加坡时间 09:30，请根据本地/服务器时区自行调整。")
 
             if st.form_submit_button("💾 保存配置"):
                 email_ready_form = bool(email_to.strip() and email_from.strip() and email_pwd)
