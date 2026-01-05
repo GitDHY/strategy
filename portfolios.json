@@ -140,5 +140,27 @@
         "weights": {
             "IWY": 100.0
         }
+    },
+    "target_1": {
+        "tickers": [
+            "G3B.SI",
+            "IWY",
+            "LVHI",
+            "WTMF",
+            "SRT.SI",
+            "AJBU.SI",
+            "GSD.SI",
+            "MBH.SI"
+        ],
+        "weights": {
+            "G3B.SI": 5.0,
+            "IWY": 55.0,
+            "LVHI": 10.0,
+            "WTMF": 10.0,
+            "SRT.SI": 3.0,
+            "AJBU.SI": 2.0,
+            "GSD.SI": 5.0,
+            "MBH.SI": 10.0
+        }
     }
 }
