@@ -151,7 +151,7 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
     
     if last_err:
         print(f"Error fetching FRED data ({series_id}): {last_err}")
-        st.warning(f"⚠️ 自动下载 FRED 数据失败 ({series_id})。错误: {last_err}\n\n**解决方法**：1) 检查网络/代理，2) 可手动下载并放入程序目录 (fred_{series_id}.csv 或 {series_id}.csv)。")
+        safe_warn(f"⚠️ 自动下载 FRED 数据失败 ({series_id})。错误: {last_err}\n\n**解决方法**：1) 检查网络/代理，2) 可手动下载并放入程序目录 (fred_{series_id}.csv 或 {series_id}.csv)。")
 
     # 3) 兜底使用本地旧文件
     for local_file in candidates:
@@ -160,12 +160,12 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
                 df = pd.read_csv(local_file, parse_dates=['observation_date'], index_col='observation_date')
                 df.columns = [series_id]
                 file_date = datetime.date.fromtimestamp(os.path.getmtime(local_file))
-                st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id})。已使用本地历史数据 (日期: {file_date})。\n\n**解决方法**：请检查网络，或手动更新数据。")
+                safe_warn(f"⚠️ 无法连接 FRED 数据源 ({series_id})。已使用本地历史数据 (日期: {file_date})。\n\n**解决方法**：请检查网络，或手动更新数据。")
                 return df
             except Exception:
                 continue
 
-    st.warning(f"⚠️ 无法连接 FRED 数据源 ({series_id}) 且无本地备份。\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件。")
+    safe_warn(f"⚠️ 无法连接 FRED 数据源 ({series_id}) 且无本地备份。\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件。")
     return pd.DataFrame()
 
 
@@ -198,29 +198,46 @@ def delete_portfolio(name):
 
 # --- Alert & Automation Config ---
 ALERT_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "alert_config.json")
+DEFAULT_ALERT_CONFIG = {
+    "enabled": False,
+    "email_to": "",
+    "email_from": "",
+    "email_pwd": "",
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "frequency": "Manual",  # Manual, Daily, Weekly
+    "trigger_time": "09:30",  # Singapore Time (UTC+8)
+    "last_run": "",
+}
 
 def load_alert_config():
     if not os.path.exists(ALERT_CONFIG_FILE):
-        return {
-            "enabled": False,
-            "email_to": "",
-            "email_from": "",
-            "email_pwd": "",
-            "smtp_server": "smtp.gmail.com",
-            "smtp_port": 587,
-            "frequency": "Manual", # Manual, Daily, Weekly
-            "trigger_time": "09:30",  # Singapore Time (UTC+8)
-            "last_run": ""
-        }
+        return DEFAULT_ALERT_CONFIG.copy()
     try:
         with open(ALERT_CONFIG_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            raise ValueError("alert_config is not a dict")
+    except Exception as e:
+        print(f"[AlertConfig] load failed, using defaults: {e}")
+        return DEFAULT_ALERT_CONFIG.copy()
+    merged = DEFAULT_ALERT_CONFIG.copy()
+    merged.update({k: v for k, v in cfg.items() if v is not None})
+    return merged
 
 def save_alert_config(config):
     with open(ALERT_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
+
+
+def safe_warn(msg: str):
+    try:
+        if threading.current_thread().name == "MainThread":
+            st.warning(msg)
+        else:
+            print(msg)
+    except Exception as e:
+        print(f"[warn] {msg} (streamlit warn failed: {e})")
 
 
 # --- Idempotent Daily Lock to Prevent Duplicate Sends ---
@@ -289,8 +306,8 @@ def analyze_market_state_logic():
     try:
         check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI', 'IWY', 'MBH.SI', 'GSD.SI']
         trend_start = datetime.date.today() - datetime.timedelta(days=400)
-        # Fetch latest data
-        data_raw = yf.download(check_assets, start=trend_start, progress=False, auto_adjust=False)
+        # Fetch latest data (add timeout to avoid blocking UI)
+        data_raw = yf.download(check_assets, start=trend_start, progress=False, auto_adjust=False, timeout=12)
         
         df_assets = pd.DataFrame()
         if not data_raw.empty:
@@ -375,6 +392,8 @@ def send_strategy_email(metrics, config):
 
     state = metrics['state']
     s_conf = MACRO_STATES.get(state, MACRO_STATES["NEUTRAL"])
+    sent_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    report_date = metrics.get('date', sent_at.split(' ')[0])
     
     # Calculate Targets
     targets = get_target_percentages(
@@ -421,6 +440,7 @@ def send_strategy_email(metrics, config):
     # Quick summary pills
     yc_val = metrics.get('yield_curve', 0)
     summary_points = [
+        f"数据截至 {report_date}",
         f"状态: {s_conf['display']}",
         f"VIX {metrics['vix']:.1f} ({'⚠️ 高波动' if metrics['fear'] else '✅ 正常'})",
         f"10Y-2Y {yc_val:.2f}% ({'⚠️ 倒挂/解倒挂' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})",
@@ -433,7 +453,8 @@ def send_strategy_email(metrics, config):
     <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; background:#f7f8fa;">
         <div style="max-width: 680px; margin: 24px auto; background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,0.05);">
             <div style="padding:22px 24px; background: linear-gradient(135deg, {s_conf['border_color']} 0%, #1f1f1f 100%); color:#fff;">
-                <div style="font-size:13px; opacity:0.85;">{metrics['date']}</div>
+                <div style="font-size:13px; opacity:0.85;">数据截至 {report_date}</div>
+                <div style="font-size:12px; opacity:0.75;">发送时间 {sent_at}</div>
                 <h2 style="margin:6px 0 4px 0; font-weight:700; letter-spacing:0.3px;">{s_conf['icon']} 宏观策略快报</h2>
                 <div style="opacity:0.9; line-height:1.5; font-size:14px;">{s_conf['desc']}</div>
             </div>
@@ -480,12 +501,21 @@ def send_strategy_email(metrics, config):
     msg = MIMEMultipart()
     msg['From'] = email_from
     msg['To'] = email_to
-    msg['Subject'] = f"[{state}] 宏观策略状态更新 - {metrics['date']}"
+    msg['Subject'] = f"[{state}] 宏观策略状态更新 - {sent_at} (数据截至 {report_date})"
     msg.attach(MIMEText(html_content, 'html'))
     
     try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
+        timeout = 20
+        use_ssl = int(smtp_port) == 465
+        if use_ssl:
+            server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=timeout)
+        else:
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=timeout)
+            try:
+                server.starttls()
+            except Exception as e:
+                server.quit()
+                return False, f"TLS 握手失败: {e}"
         server.login(email_from, email_pwd)
         server.send_message(msg)
         server.quit()
@@ -505,51 +535,56 @@ def start_scheduler_service():
     def run_scheduler_check():
         """Checks if alert needs to be sent. Runs in background thread."""
         while True:
-            cfg = load_alert_config()
-            if cfg.get("enabled", False) and cfg.get("frequency") != "Manual":
-                sg_tz = datetime.timezone(datetime.timedelta(hours=8))
-                now = datetime.datetime.now(sg_tz)
-                trigger_hm = cfg.get("trigger_time", "09:30")
-                last_run_str = cfg.get("last_run", "")
-                
-                should_run = False
-                today_str = now.strftime('%Y-%m-%d')
-                
-                # Simple check: Is it past trigger time AND haven't run today?
-                try:
-                    trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M").replace(tzinfo=sg_tz)
-                except:
-                    # Fallback if time parse fails
-                    trigger_dt = datetime.datetime.strptime(f"{today_str} 09:30", "%Y-%m-%d %H:%M").replace(tzinfo=sg_tz)
-                
-                if now >= trigger_dt:
-                    # Check frequency
-                    if cfg["frequency"] == "Daily":
-                        if last_run_str != today_str:
-                            should_run = True
-                    elif cfg["frequency"] == "Weekly":
-                        # Assume Monday is trigger day (weekday=0)
-                        if now.weekday() == 0 and last_run_str != today_str:
-                            should_run = True
-                
-                if should_run:
-                    # Idempotent guard: prevent duplicate sends across threads/processes
-                    if not acquire_daily_lock(today_str, ttl_minutes=120):
-                        print(f"[Scheduler] Skip duplicate send for {today_str} (lock exists).")
-                    else:
-                        print(f"[Scheduler] Triggering auto-analysis at {now}")
-                        success, res = analyze_market_state_logic()
-                        if success:
-                            email_ok, msg = send_strategy_email(res, cfg)
-                            if email_ok:
-                                print(f"[Scheduler] Email sent: {msg}")
-                                cfg = load_alert_config()
-                                cfg["last_run"] = today_str
-                                save_alert_config(cfg)
-                            else:
-                                print(f"[Scheduler] Email failed: {msg}")
+            try:
+                cfg = load_alert_config() or {}
+                enabled = bool(cfg.get("enabled", False))
+                freq = str(cfg.get("frequency", "Manual") or "Manual")
+                if enabled and freq != "Manual":
+                    sg_tz = datetime.timezone(datetime.timedelta(hours=8))
+                    now = datetime.datetime.now(sg_tz)
+                    trigger_hm = str(cfg.get("trigger_time", "09:30") or "09:30")
+                    last_run_str = str(cfg.get("last_run", "") or "")
+                    
+                    should_run = False
+                    today_str = now.strftime('%Y-%m-%d')
+                    
+                    # Simple check: Is it past trigger time AND haven't run today?
+                    try:
+                        trigger_dt = datetime.datetime.strptime(f"{today_str} {trigger_hm}", "%Y-%m-%d %H:%M").replace(tzinfo=sg_tz)
+                    except Exception:
+                        # Fallback if time parse fails
+                        trigger_dt = datetime.datetime.strptime(f"{today_str} 09:30", "%Y-%m-%d %H:%M").replace(tzinfo=sg_tz)
+                    
+                    if now >= trigger_dt:
+                        # Check frequency
+                        if freq == "Daily":
+                            if last_run_str != today_str:
+                                should_run = True
+                        elif freq == "Weekly":
+                            # Assume Monday is trigger day (weekday=0)
+                            if now.weekday() == 0 and last_run_str != today_str:
+                                should_run = True
+                    
+                    if should_run:
+                        # Idempotent guard: prevent duplicate sends across threads/processes
+                        if not acquire_daily_lock(today_str, ttl_minutes=120):
+                            print(f"[Scheduler] Skip duplicate send for {today_str} (lock exists).")
                         else:
-                            print(f"[Scheduler] Analysis failed: {res}")
+                            print(f"[Scheduler] Triggering auto-analysis at {now}")
+                            success, res = analyze_market_state_logic()
+                            if success:
+                                email_ok, msg = send_strategy_email(res, cfg)
+                                if email_ok:
+                                    print(f"[Scheduler] Email sent: {msg}")
+                                    cfg = load_alert_config()
+                                    cfg["last_run"] = today_str
+                                    save_alert_config(cfg)
+                                else:
+                                    print(f"[Scheduler] Email failed: {msg}")
+                            else:
+                                print(f"[Scheduler] Analysis failed: {res}")
+            except Exception as e:
+                print(f"[Scheduler] Loop error: {e}")
             
             time.sleep(60) # Check every minute
 
@@ -1464,38 +1499,65 @@ def render_manual_data_import():
 def render_reference_guide():
     """Renders the state reference guide."""
     with st.expander("📖 新手指南：市场状态与应对策略 (Beginner's Guide)", expanded=False):
-        st.info("💡 **系统逻辑**：自动分析宏观数据，判断当前“经济季节”，并建议“穿什么衣服”（资产配置）。")
+        st.info(
+            """💡 **判定流程（越上面优先级越高）**
+1) 拉取数据：股指/长债 (^TNX, IWY/TLT)、VIX、失业率 UNRATE、收益率曲线 T10Y2Y。
+2) 计算指标：Sahm≥0.50 判衰退；21日利率涨幅 >20% 判利率冲击；股债相关性>0.30 判相关性失效；VIX>32 判恐慌；价格<MA200 判趋势破位。
+3) 状态判定优先级：Inflation Shock → Deflation/Recession → Extreme Accumulation → Cautious Trend → Cautious Vol → Neutral。
+4) 输出对应的资产配置建议（见下表）。"""
+        )
         
-        # Define order including all 6 states
-        states_order = [
-            "INFLATION_SHOCK", "DEFLATION_RECESSION", "EXTREME_ACCUMULATION", 
-            "CAUTIOUS_TREND", "CAUTIOUS_VOL", "NEUTRAL"
+        guide_cards = [
+            {
+                "key": "INFLATION_SHOCK",
+                "trigger": "利率21日涨幅>20% 或 股债相关性>0.30 且波动上升",
+                "action": "现金为王，削减股票/长久期债，提升危机Alpha (WTMF)。",
+            },
+            {
+                "key": "DEFLATION_RECESSION",
+                "trigger": "Sahm≥0.50 或 趋势破位且VIX>35（衰退/流动性风险）",
+                "action": "全面防御：长债+黄金为主，股票权重大幅下调。",
+            },
+            {
+                "key": "EXTREME_ACCUMULATION",
+                "trigger": "VIX>32 恐慌但未触发利率/衰退条件",
+                "action": "左侧抄底：加大成长股权重，保留一定防御。",
+            },
+            {
+                "key": "CAUTIOUS_TREND",
+                "trigger": "价格跌破MA200（阴跌趋势），但未触发恐慌/衰退",
+                "action": "防御配置：提高红利/价值与现金，降低成长敞口。",
+            },
+            {
+                "key": "CAUTIOUS_VOL",
+                "trigger": "趋势尚可但VIX>20（高波震荡）",
+                "action": "保留核心成长，但用 WTMF/防御资产对冲波动。",
+            },
+            {
+                "key": "NEUTRAL",
+                "trigger": "未触发以上任一警报",
+                "action": "标准增长配置，跟随趋势持有。",
+            },
         ]
         
-        # Use 3 columns per row for better layout
-        cols1 = st.columns(3)
-        for i in range(3):
-            s_key = states_order[i]
-            s = MACRO_STATES[s_key]
-            with cols1[i]:
-                st.markdown(f"""
-                <div style="padding: 10px; border-radius: 5px; background-color: {s['bg_color']}; border-left: 4px solid {s['border_color']}; margin-bottom: 10px; height: 180px;">
-                    <div style="font-weight: bold; font-size: 15px; margin-bottom: 5px;">{s['display']}</div>
-                    <div style="font-size: 13px; color: #3c4043; line-height: 1.4;">{s['desc']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        cols2 = st.columns(3)
-        for i in range(3):
-            s_key = states_order[i+3]
-            s = MACRO_STATES[s_key]
-            with cols2[i]:
-                st.markdown(f"""
-                <div style="padding: 10px; border-radius: 5px; background-color: {s['bg_color']}; border-left: 4px solid {s['border_color']}; margin-bottom: 10px; height: 180px;">
-                    <div style="font-weight: bold; font-size: 15px; margin-bottom: 5px;">{s['display']}</div>
-                    <div style="font-size: 13px; color: #3c4043; line-height: 1.4;">{s['desc']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+        # 3 columns per row
+        cols = st.columns(3)
+        for idx, card in enumerate(guide_cards):
+            s = MACRO_STATES[card["key"]]
+            with cols[idx % 3]:
+                st.markdown(
+                    f"""
+                    <div style="padding: 12px; border-radius: 8px; background-color: {s['bg_color']}; border-left: 4px solid {s['border_color']}; margin-bottom: 12px; min-height: 190px;">
+                        <div style="font-weight: 700; font-size: 15px; margin-bottom: 6px;">{s['icon']} {s['display']}</div>
+                        <div style="font-size: 13px; color: #3c4043; line-height: 1.5; margin-bottom: 6px;">{s['desc']}</div>
+                        <div style="font-size: 12px; color: #111827; line-height: 1.6;">
+                            <b>触发条件：</b>{card['trigger']}<br/>
+                            <b>应对策略：</b>{card['action']}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 def render_portfolio_import():
     """Renders the import from saved portfolios section."""
