@@ -165,7 +165,7 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
             except Exception:
                 continue
 
-    safe_warn(f"⚠️ 无法连接 FRED 数据源 ({series_id}) 且无本地备份。\n\n**解决方法**：请展开页面顶部的 **“📂 手动导入宏观数据”** 面板，上传该数据文件。")
+    safe_warn(f"⚠️ 无法连接 FRED 数据源 ({series_id}) 且无本地备份。\n\n**解决方法**：请展开页面顶部的 **‘📂 手动导入宏观数据’** 面板，上传该数据文件。")
     return pd.DataFrame()
 
 
@@ -673,7 +673,7 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     # === 🚀 新增：动态风控层 (Dynamic Risk Control) ===
     
     # 1. 牛市增强与预警 (Aggressive Growth in Calm Waters)
-    # 只有在“常态”下才进行激进微调
+    # 只有在"常态"下才进行激进微调
     if s == "NEUTRAL":
         if vix is not None:
             # 极度平稳期 (VIX < 13)：大胆加仓，减少保险
@@ -708,7 +708,7 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
                  targets['WTMF'] += move_amt
 
     # --- 2. Global Dynamic Trend Filter (全局动态趋势过滤) ---
-    # 逻辑：除了“极度贪婪/抄底”模式外，任何资产如果处于熊市趋势（价格 < MA200），都应该被削减。
+    # 逻辑：除了"极度贪婪/抄底"模式外，任何资产如果处于熊市趋势（价格 < MA200），都应该被削减。
     # 目的：避免在宏观误判或流动性危机时死守下跌资产。
     
     if s != "EXTREME_ACCUMULATION":
@@ -1558,6 +1558,21 @@ def render_reference_guide():
                     """,
                     unsafe_allow_html=True,
                 )
+        
+        st.markdown(
+            """
+            **单个资产的动态处理规则（结合趋势/波动自动调整）：**
+            - **IWY（成长）**：核心进攻仓。Neutral/Accumulation 重仓；Cautious/Inflation/Recession 阶梯削减；若价格跌破 MA200，则标记为熊市并降低权重。
+            - **WTMF（危机 Alpha）**：对冲资产。高波震荡 (Cautious Vol) 和 通胀冲击 时显著加仓；Neutral 维持小权重；若回到平稳则逐步降回基准。
+            - **LVHI（红利/价值）**：防御权益。Cautious Trend/Vol 提升；Inflation Shock 下仍保留小比例；Neutral 适中配置。
+            - **G3B.SI（本地蓝筹）**：与成长同向但更防御。趋势破位或高波时下调；通胀/衰退场景大幅削减。
+            - **MBH.SI / TLT（长债）**：衰退防御主力。Deflation/Recession 大幅加仓；Inflation Shock 降至极低；Normal/Vol 维持中等。
+            - **GSD.SI（黄金）**：系统性风险与通胀对冲。Inflation Shock/Deflation 提升；平稳期降低至防御底仓。
+            - **SRT.SI / AJBU.SI（REITs/数据中心）**：在 Cautious/Inflation/Recession 阶段减少，Neutral 维持小权重，Accumulation 不额外加码。
+            - **OTHERS**：默认低配或清理；仅在 Neutral/Accumulation 且基本面良好时酌情持有。
+            """
+        )
+
 
 def render_portfolio_import():
     """Renders the import from saved portfolios section."""
