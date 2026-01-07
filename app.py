@@ -22,47 +22,75 @@ st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer v1.4")
 
 # --- Helper Functions for Indicators ---
 
-def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
-    """
-    Returns a list of strings explaining why the allocation differs from the base static model.
-    """
-    if asset_trends is None: asset_trends = {}
+VIX_BOOST_LO = 13.0
+VIX_CUT_HI = 20.0
+VIX_PANIC = 25.0
+YIELD_CURVE_CUTOFF = -0.30
+
+def normalize_yf_prices(df_raw):
+    if df_raw is None or len(df_raw) == 0:
+        return pd.DataFrame()
+    if isinstance(df_raw.columns, pd.MultiIndex):
+        if 'Adj Close' in df_raw.columns.get_level_values(0):
+            return df_raw['Adj Close']
+        if 'Close' in df_raw.columns.get_level_values(0):
+            return df_raw['Close']
+        return df_raw
+    if 'Adj Close' in df_raw.columns:
+        return df_raw['Adj Close']
+    if 'Close' in df_raw.columns:
+        return df_raw['Close']
+    return df_raw
+
+def evaluate_risk_triggers(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+    if asset_trends is None:
+        asset_trends = {}
     reasons = []
-    
+
     # 1. Style Regime
     if s in ["NEUTRAL", "CAUTIOUS_TREND"] and value_regime:
         reasons.append("🧱 风格轮动: 价值占优 (Value Regime) -> 增加红利，减少成长")
-        
+
     # 2. Dynamic Risk Control
-    if s == "NEUTRAL":
-        if vix is not None:
-            if vix < 13.0:
-                reasons.append("🚀 极度平稳 (VIX < 13): 激进模式 -> 清空WTMF/减债，加仓成长")
-            elif vix > 20.0:
-                reasons.append("🌬️ 早期预警 (VIX > 20): 避险模式 -> 减仓成长 20%，增加 WTMF")
-    
-    if s in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"]:
-        if yield_curve is not None and yield_curve < -0.30:
-            reasons.append("⚠️ 深度倒挂 (Yield Curve < -0.3%): 债券陷阱 -> 大幅削减 MBH，转入 WTMF")
+    if s == "NEUTRAL" and vix is not None:
+        if vix < VIX_BOOST_LO:
+            reasons.append(f"🚀 极度平稳 (VIX < {VIX_BOOST_LO}): 激进模式 -> 清空WTMF/减债，加仓成长")
+        elif vix > VIX_CUT_HI:
+            reasons.append(f"🌬️ 早期预警 (VIX > {VIX_CUT_HI}): 避险模式 -> 减仓成长 20%，增加 WTMF")
+
+    if s in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"] and yield_curve is not None:
+        if yield_curve < YIELD_CURVE_CUTOFF:
+            reasons.append(f"⚠️ 深度倒挂 (Yield Curve < {YIELD_CURVE_CUTOFF}%): 债券陷阱 -> 大幅削减 MBH，转入 WTMF")
 
     # 3. Trend Filters
     if s != "EXTREME_ACCUMULATION":
-        # Global Filter
         assets_to_check = ['G3B.SI', 'LVHI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI']
         bear_assets = [t for t in assets_to_check if asset_trends.get(t, False)]
         if bear_assets:
             reasons.append(f"📉 趋势熔断: {', '.join(bear_assets)} 破位 -> 清仓")
-            
-        # Core IWY Filter
+
         if asset_trends.get('IWY', False):
-            cut = "80%" if (vix and vix > 25) else "50%"
+            cut = "80%" if (vix and vix > VIX_PANIC) else "50%"
             reasons.append(f"🛡️ 核心熔断: IWY 破位 -> 削减 {cut} 仓位")
-            
+
     # 4. Gold
     if gold_bear:
         reasons.append("🐻 黄金熊市: Gold < MA200 -> 清仓 GSD.SI")
-        
+
     return reasons
+
+def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+    """
+    Returns a list of strings explaining why the allocation differs from the base static model.
+    """
+    return evaluate_risk_triggers(
+        s,
+        gold_bear=gold_bear,
+        value_regime=value_regime,
+        asset_trends=asset_trends,
+        vix=vix,
+        yield_curve=yield_curve,
+    )
 
 # Removed cache for debugging connection issues
 def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
@@ -416,20 +444,7 @@ def analyze_market_state_logic():
         
         df_assets = pd.DataFrame()
         if data_raw is not None and not data_raw.empty:
-            # Handle MultiIndex or Flat
-            if isinstance(data_raw.columns, pd.MultiIndex):
-                if 'Adj Close' in data_raw.columns.get_level_values(0):
-                    df_assets = data_raw['Adj Close']
-                elif 'Close' in data_raw.columns.get_level_values(0):
-                    df_assets = data_raw['Close']
-                else:
-                    df_assets = data_raw
-            elif 'Adj Close' in data_raw.columns:
-                 df_assets = data_raw['Adj Close']
-            elif 'Close' in data_raw.columns:
-                 df_assets = data_raw['Close']
-            else:
-                 df_assets = data_raw
+            df_assets = normalize_yf_prices(data_raw)
 
         if not df_assets.empty:
             df_assets = df_assets.ffill()
@@ -485,6 +500,88 @@ def analyze_market_state_logic():
     
     return True, metrics
 
+
+def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date):
+    target_rows = ""
+    for t, w in targets.items():
+        if w > 0:
+            target_rows += f"<tr><td>{ASSET_NAMES.get(t, t)}</td><td style='color:#555'>{t}</td><td><b>{w*100:.1f}%</b></td></tr>"
+
+    if adjustments:
+        adj_list = "".join([f"<li>{r}</li>" for r in adjustments])
+        adj_html = f"""
+        <div style="background:#fff6f2;border:1px solid #ffd7c2;border-radius:10px;padding:14px 16px;margin:12px 0;">
+            <div style="font-weight:600;color:#d93025;margin-bottom:6px;">🔧 动态风控触发</div>
+            <ul style="line-height:1.6;margin:0;color:#b23c17;">{adj_list}</ul>
+        </div>
+        """
+    else:
+        adj_html = """
+        <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:10px;padding:14px 16px;margin:12px 0;">
+            <div style="font-weight:600;color:#237804;">✅ 当前未触发额外风控</div>
+        </div>
+        """
+
+    yc_val = metrics.get('yield_curve', 0)
+    summary_points = [
+        f"数据截至 {report_date}",
+        f"状态: {s_conf['display']}",
+        f"VIX {metrics['vix']:.1f} ({'⚠️ 高波动' if metrics['fear'] else '✅ 正常'})",
+        f"10Y-2Y {yc_val:.2f}% ({'⚠️ 倒挂/解倒挂' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})",
+        f"Sahm {metrics['sahm']:.2f} ({'⚠️ 衰退信号' if metrics['recession'] else '✅ 未触发'})"
+    ]
+    summary_html = "".join([f"<span style='display:inline-block;background:#f0f4ff;color:#1a73e8;padding:6px 10px;border-radius:20px;margin:4px 4px 0 0;font-size:13px;'>{p}</span>" for p in summary_points])
+
+    return f"""
+    <html>
+    <body style=\"font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; background:#f7f8fa;\">
+        <div style=\"max-width: 680px; margin: 24px auto; background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,0.05);\">
+            <div style=\"padding:22px 24px; background: linear-gradient(135deg, {s_conf['border_color']} 0%, #1f1f1f 100%); color:#fff;\">
+                <div style=\"font-size:13px; opacity:0.85;\">数据截至 {report_date}</div>
+                <div style=\"font-size:12px; opacity:0.75;\">发送时间 {sent_at}</div>
+                <h2 style=\"margin:6px 0 4px 0; font-weight:700; letter-spacing:0.3px;\">{s_conf['icon']} 宏观策略快报</h2>
+                <div style=\"opacity:0.9; line-height:1.5; font-size:14px;\">{s_conf['desc']}</div>
+            </div>
+
+            <div style=\"padding:22px 24px;\">
+                <div style=\"margin-bottom:12px;\">{summary_html}</div>
+
+                <h3 style=\"margin:18px 0 10px 0; font-size:16px;\">📈 核心指标 (Key Metrics)</h3>
+                <table style=\"width:100%; border-collapse:separate; border-spacing:0 8px; font-size:14px;\">
+                    <tr style=\"background:#f9fafb;\"><td style=\"padding:10px 12px; border-radius:10px 0 0 10px;\">利率冲击</td><td style=\"padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['rate_shock'] else '#15803d'};\">{metrics['tnx_roc']:.1%} ({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</td></tr>
+                    <tr style=\"background:#f9fafb;\"><td style=\"padding:10px 12px; border-radius:10px 0 0 10px;\">Sahm Rule</td><td style=\"padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['recession'] else '#15803d'};\">{metrics['sahm']:.2f} ({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</td></tr>
+                    <tr style=\"background:#f9fafb;\"><td style=\"padding:10px 12px; border-radius:10px 0 0 10px;\">VIX</td><td style=\"padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#ea580c' if metrics['fear'] else '#15803d'};\">{metrics['vix']:.1f} ({'⚠️ 恐慌' if metrics['fear'] else '✅ 正常'})</td></tr>
+                    <tr style=\"background:#f9fafb;\"><td style=\"padding:10px 12px; border-radius:10px 0 0 10px;\">股债相关性</td><td style=\"padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['corr_broken'] else '#15803d'};\">{metrics['corr']:.2f} ({'⚠️ 失效' if metrics['corr_broken'] else '✅ 正常'})</td></tr>
+                    <tr style=\"background:#f9fafb;\"><td style=\"padding:10px 12px; border-radius:10px 0 0 10px;\">收益率曲线 (10Y-2Y)</td><td style=\"padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '#15803d'};\">{yc_val:.2f}%</td></tr>
+                </table>
+
+                <h3 style=\"margin:20px 0 10px 0; font-size:16px;\">🎯 战术概览 (Tactical)</h3>
+                <ul style=\"line-height:1.6; margin-top:6px; padding-left:18px; color:#374151;\">
+                    <li><b>黄金趋势:</b> {'🐻 回避' if metrics['gold_bear'] else '🐂 持有/增配'}</li>
+                    <li><b>风格轮动:</b> {'🧱 Value 价值占优' if metrics['value_regime'] else '🚀 Growth 成长占优'}</li>
+                </ul>
+
+                {adj_html}
+
+                <h3 style=\"margin:20px 0 10px 0; font-size:16px;\">📊 建议配置 (Target Allocation)</h3>
+                <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" style=\"width: 100%; border-collapse: collapse; margin-top: 8px; font-size:14px;\">
+                    <tr style=\"background-color: #f3f4f6; text-align: left;\">
+                        <th style=\"border-bottom: 2px solid #e5e7eb;\">资产名称</th>
+                        <th style=\"border-bottom: 2px solid #e5e7eb;\">代码</th>
+                        <th style=\"border-bottom: 2px solid #e5e7eb;\">目标仓位</th>
+                    </tr>
+                    {target_rows}
+                </table>
+
+                <p style=\"font-size: 12px; color: #6b7280; margin-top: 26px; text-align: center; border-top: 1px solid #e5e7eb; padding-top: 10px;\">
+                    此邮件由 Stock Strategy Analyzer 自动生成，供参考，不构成投资建议。
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
 def send_strategy_email(metrics, config):
     """发送策略分析邮件，返回 (success, message)。"""
     email_to = str(config.get("email_to", "")).strip()
@@ -505,109 +602,26 @@ def send_strategy_email(metrics, config):
     sent_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     report_date = metrics.get('date', sent_at.split(' ')[0])
     
-    # Calculate Targets
     targets = get_target_percentages(
-        state, 
-        gold_bear=metrics['gold_bear'], 
-        value_regime=metrics['value_regime'], 
+        state,
+        gold_bear=metrics['gold_bear'],
+        value_regime=metrics['value_regime'],
         asset_trends=metrics.get('asset_trends', {}),
         vix=metrics.get('vix'),
         yield_curve=metrics.get('yield_curve')
     )
-    
-    # Build Target Table
-    target_rows = ""
-    for t, w in targets.items():
-        if w > 0:
-            target_rows += f"<tr><td>{ASSET_NAMES.get(t, t)}</td><td style='color:#555'>{t}</td><td><b>{w*100:.1f}%</b></td></tr>"
 
-    # Get Adjustment Reasons
     adjustments = get_adjustment_reasons(
-        state, 
-        gold_bear=metrics['gold_bear'], 
-        value_regime=metrics['value_regime'], 
+        state,
+        gold_bear=metrics['gold_bear'],
+        value_regime=metrics['value_regime'],
         asset_trends=metrics.get('asset_trends', {}),
         vix=metrics.get('vix'),
         yield_curve=metrics.get('yield_curve')
     )
 
-    adj_html = ""
-    if adjustments:
-        adj_list = "".join([f"<li>{r}</li>" for r in adjustments])
-        adj_html = f"""
-        <div style="background:#fff6f2;border:1px solid #ffd7c2;border-radius:10px;padding:14px 16px;margin:12px 0;">
-            <div style="font-weight:600;color:#d93025;margin-bottom:6px;">🔧 动态风控触发</div>
-            <ul style="line-height:1.6;margin:0;color:#b23c17;">{adj_list}</ul>
-        </div>
-        """
-    else:
-        adj_html = """
-        <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:10px;padding:14px 16px;margin:12px 0;">
-            <div style="font-weight:600;color:#237804;">✅ 当前未触发额外风控</div>
-        </div>
-        """
+    html_content = render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date)
 
-    # Quick summary pills
-    yc_val = metrics.get('yield_curve', 0)
-    summary_points = [
-        f"数据截至 {report_date}",
-        f"状态: {s_conf['display']}",
-        f"VIX {metrics['vix']:.1f} ({'⚠️ 高波动' if metrics['fear'] else '✅ 正常'})",
-        f"10Y-2Y {yc_val:.2f}% ({'⚠️ 倒挂/解倒挂' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})",
-        f"Sahm {metrics['sahm']:.2f} ({'⚠️ 衰退信号' if metrics['recession'] else '✅ 未触发'})"
-    ]
-    summary_html = "".join([f"<span style='display:inline-block;background:#f0f4ff;color:#1a73e8;padding:6px 10px;border-radius:20px;margin:4px 4px 0 0;font-size:13px;'>{p}</span>" for p in summary_points])
-
-    html_content = f"""
-    <html>
-    <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #1f2937; background:#f7f8fa;">
-        <div style="max-width: 680px; margin: 24px auto; background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; box-shadow:0 10px 30px rgba(0,0,0,0.05);">
-            <div style="padding:22px 24px; background: linear-gradient(135deg, {s_conf['border_color']} 0%, #1f1f1f 100%); color:#fff;">
-                <div style="font-size:13px; opacity:0.85;">数据截至 {report_date}</div>
-                <div style="font-size:12px; opacity:0.75;">发送时间 {sent_at}</div>
-                <h2 style="margin:6px 0 4px 0; font-weight:700; letter-spacing:0.3px;">{s_conf['icon']} 宏观策略快报</h2>
-                <div style="opacity:0.9; line-height:1.5; font-size:14px;">{s_conf['desc']}</div>
-            </div>
-
-            <div style="padding:22px 24px;">
-                <div style="margin-bottom:12px;">{summary_html}</div>
-
-                <h3 style="margin:18px 0 10px 0; font-size:16px;">📈 核心指标 (Key Metrics)</h3>
-                <table style="width:100%; border-collapse:separate; border-spacing:0 8px; font-size:14px;">
-                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">利率冲击</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['rate_shock'] else '#15803d'};">{metrics['tnx_roc']:.1%} ({'⚠️ 触发' if metrics['rate_shock'] else '✅ 安全'})</td></tr>
-                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">Sahm Rule</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['recession'] else '#15803d'};">{metrics['sahm']:.2f} ({'⚠️ 触发' if metrics['recession'] else '✅ 安全'})</td></tr>
-                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">VIX</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#ea580c' if metrics['fear'] else '#15803d'};">{metrics['vix']:.1f} ({'⚠️ 恐慌' if metrics['fear'] else '✅ 正常'})</td></tr>
-                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">股债相关性</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if metrics['corr_broken'] else '#15803d'};">{metrics['corr']:.2f} ({'⚠️ 失效' if metrics['corr_broken'] else '✅ 正常'})</td></tr>
-                    <tr style="background:#f9fafb;"><td style="padding:10px 12px; border-radius:10px 0 0 10px;">收益率曲线 (10Y-2Y)</td><td style="padding:10px 12px; border-radius:0 10px 10px 0; font-weight:600; color:{'#d93025' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '#15803d'};">{yc_val:.2f}%</td></tr>
-                </table>
-
-                <h3 style="margin:20px 0 10px 0; font-size:16px;">🎯 战术概览 (Tactical)</h3>
-                <ul style="line-height:1.6; margin-top:6px; padding-left:18px; color:#374151;">
-                    <li><b>黄金趋势:</b> {'🐻 回避' if metrics['gold_bear'] else '🐂 持有/增配'}</li>
-                    <li><b>风格轮动:</b> {'🧱 Value 价值占优' if metrics['value_regime'] else '🚀 Growth 成长占优'}</li>
-                </ul>
-
-                {adj_html}
-
-                <h3 style="margin:20px 0 10px 0; font-size:16px;">📊 建议配置 (Target Allocation)</h3>
-                <table border="0" cellpadding="10" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-top: 8px; font-size:14px;">
-                    <tr style="background-color: #f3f4f6; text-align: left;">
-                        <th style="border-bottom: 2px solid #e5e7eb;">资产名称</th>
-                        <th style="border-bottom: 2px solid #e5e7eb;">代码</th>
-                        <th style="border-bottom: 2px solid #e5e7eb;">目标仓位</th>
-                    </tr>
-                    {target_rows}
-                </table>
-
-                <p style="font-size: 12px; color: #6b7280; margin-top: 26px; text-align: center; border-top: 1px solid #e5e7eb; padding-top: 10px;">
-                    此邮件由 Stock Strategy Analyzer 自动生成，供参考，不构成投资建议。
-                </p>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    
     msg = MIMEMultipart()
     msg['From'] = email_from
     msg['To'] = email_to
@@ -637,6 +651,8 @@ def send_strategy_email(metrics, config):
 
 # --- Background Scheduler (Lightweight) ---
 
+scheduler_thread = None
+
 @st.cache_resource
 def start_scheduler_service():
     """
@@ -644,6 +660,12 @@ def start_scheduler_service():
     Uses @st.cache_resource to ensure only one thread runs per server process,
     preventing duplicate emails when multiple tabs are open.
     """
+    global scheduler_thread
+    if scheduler_thread:
+        return scheduler_thread
+    if st.session_state.get("_scheduler_started"):
+        return scheduler_thread
+
     def run_scheduler_check():
         """Checks if alert needs to be sent. Runs in background thread."""
         while True:
@@ -703,170 +725,147 @@ def start_scheduler_service():
     # Create and start the thread
     t = threading.Thread(target=run_scheduler_check, daemon=True)
     t.start()
+    scheduler_thread = t
+    st.session_state["_scheduler_started"] = True
     print("[System] Global background scheduler service started.")
-    return t
+    return scheduler_thread
 
 # Start scheduler (Singleton)
-start_scheduler_service()
+if __name__ == "__main__":
+    start_scheduler_service()
 
 # --- Shared Logic for Backtest & State Machine ---
 
-def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
-    """
-    Returns target asset allocation based on macro state.
-    Shared by State Machine Diagnosis and Backtest.
-    asset_trends: dict {ticker: is_bearish_bool} - optional override for asset specific trends
-    """
-    if asset_trends is None:
-        asset_trends = {}
-
-    targets = {}
-    
-    # --- 1. Base Allocation (基于宏观状态的原始配置) ---
+def base_allocation(s, value_regime=False):
     if s == "INFLATION_SHOCK":
-        # Rate Spike: Kill Duration, Cash is King, Trend Following (WTMF)
-        # Optimized: Increased WTMF to capture trend, Removed G3B (Equity exposure)
-        targets = {
+        return {
             'IWY': 0.00, 'WTMF': 0.50, 'LVHI': 0.15,
             'G3B.SI': 0.00, 'MBH.SI': 0.00, 'GSD.SI': 0.25,
             'SRT.SI': 0.00, 'AJBU.SI': 0.10
         }
-    elif s == "DEFLATION_RECESSION":
-        # Recession: Long Bonds, Gold
-        targets = {
+    if s == "DEFLATION_RECESSION":
+        return {
             'IWY': 0.05, 'WTMF': 0.20, 'LVHI': 0.05,
             'G3B.SI': 0.00, 'MBH.SI': 0.40, 'GSD.SI': 0.25,
             'SRT.SI': 0.00, 'AJBU.SI': 0.05
         }
-    elif s == "EXTREME_ACCUMULATION":
-        # Buy Dip (左侧交易，不进行动量过滤)
-        targets = {
+    if s == "EXTREME_ACCUMULATION":
+        return {
             'IWY': 0.75, 'WTMF': 0.00, 'LVHI': 0.00,
             'G3B.SI': 0.10, 'MBH.SI': 0.05, 'GSD.SI': 0.05,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
-    elif s == "CAUTIOUS_TREND":
-        # Bear Trend: Defensive, but use WTMF for downside protection
-        # Optimized: Increased WTMF, Reduced localized equity (G3B)
+    if s == "CAUTIOUS_TREND":
         growth_w = 0.10
         value_w = 0.20
         if value_regime:
             growth_w = 0.05
             value_w = 0.25
-        
-        targets = {
+        return {
             'IWY': growth_w, 'WTMF': 0.25, 'LVHI': value_w,
             'G3B.SI': 0.10, 'MBH.SI': 0.15, 'GSD.SI': 0.10,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
-    elif s == "CAUTIOUS_VOL":
-        # High Vol: Hedge
-        # Optimized: Reduced Equity, Increased Crisis Alpha
-        targets = {
+    if s == "CAUTIOUS_VOL":
+        return {
             'IWY': 0.30, 'WTMF': 0.30, 'LVHI': 0.10,
             'G3B.SI': 0.10, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
             'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
-    else: # NEUTRAL
-        # Style Rotation
-        # Optimized: Slightly higher growth base, less drag from diversifiers
-        growth_w = 0.55
-        value_w = 0.10
-        if value_regime:
-            growth_w = 0.45
-            value_w = 0.20
-            
-        targets = {
-            'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
-            'G3B.SI': 0.05, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
-            'SRT.SI': 0.03, 'AJBU.SI': 0.02
-        }
+    # NEUTRAL
+    growth_w = 0.55
+    value_w = 0.10
+    if value_regime:
+        growth_w = 0.45
+        value_w = 0.20
+    return {
+        'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
+        'G3B.SI': 0.05, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
+        'SRT.SI': 0.03, 'AJBU.SI': 0.02
+    }
 
-    # === 🚀 新增：动态风控层 (Dynamic Risk Control) ===
-    
-    # 1. 牛市增强与预警 (Aggressive Growth in Calm Waters)
-    # 只有在"常态"下才进行激进微调
-    if s == "NEUTRAL":
-        if vix is not None:
-            # 极度平稳期 (VIX < 13)：大胆加仓，减少保险
-            if vix < 13.0:
-                # 从 WTMF (保险) 挪到 IWY (成长)
-                wtmf_amt = targets.get('WTMF', 0)
-                targets['WTMF'] = 0.0
-                targets['IWY'] += wtmf_amt
-                
-                # 若还不够激进，可适当减少低效债券 (MBH)
-                mbh_amt = targets.get('MBH.SI', 0) * 0.5
-                targets['MBH.SI'] -= mbh_amt
-                targets['IWY'] += mbh_amt
-                
-            # 早期动荡预警 (VIX > 20)：虽然没到恐慌(32)，但先跑为敬
-            elif vix > 20.0:
-                cut_amt = 0.20 # 减仓 20%
-                # 从 IWY (成长) 挪到 WTMF (保险)
-                available_growth = targets.get('IWY', 0)
-                move_amt = min(available_growth, cut_amt)
-                targets['IWY'] -= move_amt
-                targets['WTMF'] += move_amt
 
-    # 2. 债券陷阱规避 (Avoid Bond Trap)
-    # 如果处于衰退或震荡期，且收益率曲线深度倒挂，长债可能不仅不避险，反而下跌
-    if s in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"]:
-        if yield_curve is not None and yield_curve < -0.30:
-             # 削减长债/新元债，转为抗跌的 WTMF 或现金
-             if targets.get('MBH.SI', 0) > 0:
-                 move_amt = targets['MBH.SI'] * 0.7 # 大幅削减
-                 targets['MBH.SI'] -= move_amt
-                 targets['WTMF'] += move_amt
+def apply_vix_adjustments(targets, state, vix):
+    if state != "NEUTRAL" or vix is None:
+        return
+    if vix < VIX_BOOST_LO:
+        wtmf_amt = targets.get('WTMF', 0)
+        targets['WTMF'] = 0.0
+        targets['IWY'] = targets.get('IWY', 0) + wtmf_amt
 
-    # --- 2. Global Dynamic Trend Filter (全局动态趋势过滤) ---
-    # 逻辑：除了"极度贪婪/抄底"模式外，任何资产如果处于熊市趋势（价格 < MA200），都应该被削减。
-    # 目的：避免在宏观误判或流动性危机时死守下跌资产。
-    
-    if s != "EXTREME_ACCUMULATION":
-        # 需要检查趋势的资产列表 (IWY 单独处理，这里检查配角)
-        assets_to_check = ['G3B.SI', 'LVHI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI']
-        
-        for asset in assets_to_check:
-            # 如果该资产在当前配置中有仓位，且处于熊市趋势
-            if targets.get(asset, 0) > 0 and asset_trends.get(asset, False):
-                weight_to_move = targets[asset]
-                targets[asset] = 0.0 # 清仓该弱势资产
-                
-                # --- 资金去向逻辑 ---
-                if s == "NEUTRAL":
-                    # 牛市逻辑：如果配角弱，资金去主角 (IWY)。
-                    # 但前提是主角 (IWY) 自己必须强。
-                    if not asset_trends.get('IWY', False): # IWY is NOT bearish
-                         targets['IWY'] += weight_to_move
-                    else:
-                         # 如果连 IWY 都弱，那就去避险 (WTMF)
-                         targets['WTMF'] += weight_to_move
+        mbh_amt = targets.get('MBH.SI', 0) * 0.5
+        targets['MBH.SI'] = targets.get('MBH.SI', 0) - mbh_amt
+        targets['IWY'] = targets.get('IWY', 0) + mbh_amt
+    elif vix > VIX_CUT_HI:
+        cut_amt = 0.20
+        move_amt = min(targets.get('IWY', 0), cut_amt)
+        targets['IWY'] = targets.get('IWY', 0) - move_amt
+        targets['WTMF'] = targets.get('WTMF', 0) + move_amt
+
+
+def apply_yield_curve_guard(targets, state, yield_curve):
+    if state not in ["DEFLATION_RECESSION", "CAUTIOUS_TREND"]:
+        return
+    if yield_curve is None or yield_curve >= YIELD_CURVE_CUTOFF:
+        return
+    if targets.get('MBH.SI', 0) > 0:
+        move_amt = targets['MBH.SI'] * 0.7
+        targets['MBH.SI'] -= move_amt
+        targets['WTMF'] = targets.get('WTMF', 0) + move_amt
+
+
+def apply_trend_filters(targets, state, asset_trends):
+    if state == "EXTREME_ACCUMULATION":
+        return
+    assets_to_check = ['G3B.SI', 'LVHI', 'MBH.SI', 'GSD.SI', 'SRT.SI', 'AJBU.SI']
+    for asset in assets_to_check:
+        if targets.get(asset, 0) > 0 and asset_trends.get(asset, False):
+            weight_to_move = targets[asset]
+            targets[asset] = 0.0
+            if state == "NEUTRAL":
+                if not asset_trends.get('IWY', False):
+                    targets['IWY'] = targets.get('IWY', 0) + weight_to_move
                 else:
-                    # 熊市/震荡逻辑 (Cautious/Recession/Shock)：
-                    # 风险厌恶。如果防御资产都跌（例如债熊），资金必须去现金/危机Alpha (WTMF)。
-                    targets['WTMF'] += weight_to_move
+                    targets['WTMF'] = targets.get('WTMF', 0) + weight_to_move
+            else:
+                targets['WTMF'] = targets.get('WTMF', 0) + weight_to_move
 
-    # --- 3. IWY (Core) Safety Valve (核心资产熔断) ---
-    # 如果处于非抄底模式，且核心资产 IWY 破位，必须大幅降低风险
-    if s != "EXTREME_ACCUMULATION" and targets.get('IWY', 0) > 0:
-        if asset_trends.get('IWY', False): # IWY is Bearish
-            # 如果 VIX 高，说明是恐慌性下跌，砍得更狠
-            severity = 0.5
-            if vix is not None and vix > 25:
-                severity = 0.8
-                
-            cut_amount = targets['IWY'] * severity
-            targets['IWY'] -= cut_amount
-            targets['WTMF'] += cut_amount
 
-    # --- 4. Gold Trend Filter (Legacy) ---
-    # 保留原有的黄金独立判断，作为最后一道防线
+def apply_iwy_safety_valve(targets, state, asset_trends, vix):
+    if state == "EXTREME_ACCUMULATION" or targets.get('IWY', 0) <= 0:
+        return
+    if asset_trends.get('IWY', False):
+        severity = 0.5
+        if vix is not None and vix > VIX_PANIC:
+            severity = 0.8
+        cut_amount = targets['IWY'] * severity
+        targets['IWY'] -= cut_amount
+        targets['WTMF'] = targets.get('WTMF', 0) + cut_amount
+
+
+def apply_gold_filter(targets, gold_bear):
     if gold_bear and targets.get('GSD.SI', 0) > 0:
-        cut_amount = targets['GSD.SI'] # 直接清仓
+        cut_amount = targets['GSD.SI']
         targets['GSD.SI'] -= cut_amount
-        targets['WTMF'] += cut_amount
-    
+        targets['WTMF'] = targets.get('WTMF', 0) + cut_amount
+
+
+def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+    """
+    Returns target asset allocation based on macro state.
+    Shared by State Machine Diagnosis and Backtest.
+    asset_trends: dict {ticker: is_bearish_bool}
+    """
+    asset_trends = asset_trends or {}
+
+    targets = base_allocation(s, value_regime)
+
+    apply_vix_adjustments(targets, s, vix)
+    apply_yield_curve_guard(targets, s, yield_curve)
+    apply_trend_filters(targets, s, asset_trends)
+    apply_iwy_safety_valve(targets, s, asset_trends, vix)
+    apply_gold_filter(targets, gold_bear)
+
     return targets
 
 def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
@@ -1426,17 +1425,8 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
     if df_all is None or df_all.empty:
         return pd.DataFrame(), "Market data fetch failed or incomplete."
 
-    # Handle MultiIndex
-    if isinstance(df_all.columns, pd.MultiIndex):
-        if 'Adj Close' in df_all.columns.get_level_values(0):
-            data = df_all['Adj Close']
-        elif 'Close' in df_all.columns.get_level_values(0):
-            data = df_all['Close']
-        else:
-            data = df_all
-    else:
-        data = df_all
-        
+    data = normalize_yf_prices(df_all)
+    
     if data.empty:
          return pd.DataFrame(), "Market data fetch failed or incomplete."
 
