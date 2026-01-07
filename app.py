@@ -83,16 +83,19 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
     base_dir = os.path.dirname(__file__)
     file_name = f"fred_{series_id}.csv"
     alt_name = f"{series_id}.csv"
+    cache_dir = os.path.join(base_dir, "data")
+    os.makedirs(cache_dir, exist_ok=True)
     candidates = [
         os.path.join(base_dir, file_name),
         os.path.join(os.getcwd(), file_name),
         os.path.join(base_dir, alt_name),
         os.path.join(os.getcwd(), alt_name),
-        os.path.join(base_dir, "data", file_name),
-        os.path.join(base_dir, "data", alt_name),
+        os.path.join(cache_dir, file_name),
+        os.path.join(cache_dir, alt_name),
     ]
     candidates = list(dict.fromkeys(candidates))
     target_path = candidates[0]
+    lastgood_path = os.path.join(cache_dir, f"fred_{series_id}_lastgood.csv")
     
     # 1) 当日本地缓存（识别手动下载的两种命名）
     for path in candidates:
@@ -106,7 +109,7 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
             except Exception as e:
                 print(f"Error reading fresh local file {path}: {e}")
     
-    # 2) 网络下载（含 https -> http 备份）
+    # 2) 网络下载（含 https -> http 备份 + 退避重试）
     urls = [
         f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}",
         f"http://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}",
@@ -121,6 +124,7 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
     
     last_err = None
     for attempt in range(max_attempts):
+        backoff = max(1, (attempt + 1))
         for url in urls:
             try:
                 resp = requests.get(url, headers=headers, timeout=timeout_sec, verify=False, allow_redirects=True)
@@ -139,6 +143,8 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
                 try:
                     with open(target_path, "w", encoding="utf-8") as f:
                         f.write(content)
+                    with open(lastgood_path, "w", encoding="utf-8") as f:
+                        f.write(content)
                 except Exception as e:
                     print(f"Failed to write cache file: {e}")
                 df = pd.read_csv(io.StringIO(content), parse_dates=['observation_date'], index_col='observation_date')
@@ -147,14 +153,18 @@ def fetch_fred_data(series_id, max_attempts: int = 2, timeout_sec: int = 10):
             except Exception as e:
                 last_err = f"{url} -> {e}"
                 continue
-        time.sleep(1)
+        time.sleep(backoff)
     
     if last_err:
         print(f"Error fetching FRED data ({series_id}): {last_err}")
         safe_warn(f"⚠️ 自动下载 FRED 数据失败 ({series_id})。错误: {last_err}\n\n**解决方法**：1) 检查网络/代理，2) 可手动下载并放入程序目录 (fred_{series_id}.csv 或 {series_id}.csv)。")
 
-    # 3) 兜底使用本地旧文件
-    for local_file in candidates:
+    # 3) 兜底使用本地旧文件（含 lastgood）
+    fallback_candidates = list(candidates)
+    if lastgood_path not in fallback_candidates:
+        fallback_candidates.append(lastgood_path)
+
+    for local_file in fallback_candidates:
         if os.path.exists(local_file):
             try:
                 df = pd.read_csv(local_file, parse_dates=['observation_date'], index_col='observation_date')
@@ -211,18 +221,23 @@ DEFAULT_ALERT_CONFIG = {
 }
 
 def load_alert_config():
-    if not os.path.exists(ALERT_CONFIG_FILE):
-        return DEFAULT_ALERT_CONFIG.copy()
-    try:
-        with open(ALERT_CONFIG_FILE, "r") as f:
-            cfg = json.load(f)
-        if not isinstance(cfg, dict):
-            raise ValueError("alert_config is not a dict")
-    except Exception as e:
-        print(f"[AlertConfig] load failed, using defaults: {e}")
-        return DEFAULT_ALERT_CONFIG.copy()
-    merged = DEFAULT_ALERT_CONFIG.copy()
-    merged.update({k: v for k, v in cfg.items() if v is not None})
+    if os.path.exists(ALERT_CONFIG_FILE):
+        try:
+            with open(ALERT_CONFIG_FILE, "r") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            log_event("ERROR", "[AlertConfig] load failed, using defaults", {"err": str(e)})
+            cfg = DEFAULT_ALERT_CONFIG.copy()
+    else:
+        cfg = DEFAULT_ALERT_CONFIG.copy()
+
+    merged, issues, warns = validate_alert_config(cfg)
+    for w in warns:
+        safe_warn(f"⚠️ 配置提醒: {w}")
+        log_event("WARN", w)
+    for i in issues:
+        safe_warn(f"⚠️ {i}")
+        log_event("ERROR", i)
     return merged
 
 def save_alert_config(config):
@@ -238,6 +253,92 @@ def safe_warn(msg: str):
             print(msg)
     except Exception as e:
         print(f"[warn] {msg} (streamlit warn failed: {e})")
+
+
+def log_event(level: str, message: str, extra=None):
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    payload = {"ts": ts, "level": level.upper(), "msg": message}
+    if extra:
+        payload["extra"] = extra
+    try:
+        print(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        print(f"[{level}] {message} | extra={extra}")
+
+
+def validate_alert_config(cfg: dict):
+    merged = DEFAULT_ALERT_CONFIG.copy()
+    issues = []
+    warns = []
+    if not isinstance(cfg, dict):
+        issues.append("配置文件格式错误，已恢复默认配置")
+        return merged, issues, warns
+
+    # Required keys & types
+    merged.update({k: cfg.get(k, v) for k, v in merged.items()})
+
+    # Email fields
+    for key in ["email_to", "email_from"]:
+        merged[key] = str(merged.get(key, "") or "").strip()
+    merged["email_pwd"] = merged.get("email_pwd", "") or ""
+    env_pwd = os.environ.get("ALERT_EMAIL_PWD") or os.environ.get("SMTP_PASSWORD")
+    if not merged["email_pwd"] and env_pwd:
+        merged["email_pwd"] = env_pwd
+        warns.append("已使用环境变量中的邮箱密码/授权码")
+
+    # SMTP port
+    try:
+        merged["smtp_port"] = int(merged.get("smtp_port", 587))
+    except Exception:
+        merged["smtp_port"] = 587
+        warns.append("SMTP 端口无效，已回退 587")
+
+    # Frequency
+    freq = str(merged.get("frequency", "Manual") or "Manual")
+    if freq not in ["Manual", "Daily", "Weekly"]:
+        warns.append("frequency 非法，已回退 Manual")
+        merged["frequency"] = "Manual"
+    else:
+        merged["frequency"] = freq
+
+    # Trigger time
+    trig = str(merged.get("trigger_time", "09:30") or "09:30")
+    try:
+        datetime.datetime.strptime(trig, "%H:%M")
+        merged["trigger_time"] = trig
+    except Exception:
+        merged["trigger_time"] = "09:30"
+        warns.append("触发时间格式无效，已回退 09:30")
+
+    # Enabled flag
+    merged["enabled"] = bool(merged.get("enabled", False))
+
+    return merged, issues, warns
+
+
+def check_data_health(df_hist: pd.DataFrame, freshness_limit_days: int = 5):
+    warnings = []
+    latest_date = None
+    freshness_days = None
+    if df_hist is None or df_hist.empty:
+        warnings.append("数据为空，无法评估新鲜度")
+        return warnings, latest_date, freshness_days
+
+    latest_date = df_hist.index[-1].date()
+    freshness_days = (datetime.date.today() - latest_date).days
+    if freshness_days > freshness_limit_days:
+        warnings.append(f"数据已滞后 {freshness_days} 天，请检查数据源或手动上传。")
+
+    required_cols = ["State", "Sahm", "RateShock", "Corr", "VIX", "Trend_Bear", "YieldCurve"]
+    missing = [c for c in required_cols if c not in df_hist.columns]
+    if missing:
+        warnings.append(f"缺少必要字段: {', '.join(missing)}")
+    else:
+        na_cols = [c for c in required_cols if df_hist[c].isna().any()]
+        if na_cols:
+            warnings.append(f"存在空值字段: {', '.join(na_cols)}，建议刷新或补齐数据。")
+
+    return warnings, latest_date, freshness_days
 
 
 # --- Idempotent Daily Lock to Prevent Duplicate Sends ---
@@ -296,6 +397,11 @@ def analyze_market_state_logic():
     
     if df_hist.empty:
         return False, err
+
+    data_warnings, latest_date, freshness_days = check_data_health(df_hist)
+    for w in data_warnings:
+        safe_warn(f"⚠️ 数据健康提醒: {w}")
+        log_event("WARN", "data_health", {"msg": w})
     
     # Extract latest state
     last_row = df_hist.iloc[-1]
@@ -306,11 +412,10 @@ def analyze_market_state_logic():
     try:
         check_assets = ['G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI', 'IWY', 'MBH.SI', 'GSD.SI']
         trend_start = datetime.date.today() - datetime.timedelta(days=400)
-        # Fetch latest data (add timeout to avoid blocking UI)
-        data_raw = yf.download(check_assets, start=trend_start, progress=False, auto_adjust=False, timeout=12)
+        data_raw = fetch_yf_with_retry(check_assets, start=trend_start, auto_adjust=False)
         
         df_assets = pd.DataFrame()
-        if not data_raw.empty:
+        if data_raw is not None and not data_raw.empty:
             # Handle MultiIndex or Flat
             if isinstance(data_raw.columns, pd.MultiIndex):
                 if 'Adj Close' in data_raw.columns.get_level_values(0):
@@ -347,6 +452,7 @@ def analyze_market_state_logic():
                         asset_trends[t] = False
     except Exception as e:
         print(f"Error fetching asset trends: {e}")
+        log_event("ERROR", "asset_trend_fetch_failed", {"err": str(e)})
 
     # Logic helpers
     yc_series = df_hist['YieldCurve']
@@ -371,7 +477,10 @@ def analyze_market_state_logic():
         'yc_un_invert': yc_un_invert,
         'gold_bear': last_row['Gold_Bear'],
         'value_regime': last_row['Value_Regime'],
-        'asset_trends': asset_trends
+        'asset_trends': asset_trends,
+        'freshness_days': freshness_days,
+        'latest_date': last_row.name.date() if hasattr(last_row, 'name') else None,
+        'data_warnings': data_warnings
     }
     
     return True, metrics
@@ -388,6 +497,7 @@ def send_strategy_email(metrics, config):
         smtp_port = 587
 
     if not email_to or not email_from or not email_pwd:
+        log_event("ERROR", "email config incomplete", {"to": email_to, "from": email_from})
         return False, "邮箱配置不完整"
 
     state = metrics['state']
@@ -519,8 +629,10 @@ def send_strategy_email(metrics, config):
         server.login(email_from, email_pwd)
         server.send_message(msg)
         server.quit()
+        log_event("INFO", "email sent", {"to": email_to, "state": state, "report_date": report_date})
         return True, "邮件发送成功"
     except Exception as e:
+        log_event("ERROR", "email send failed", {"err": str(e)})
         return False, f"邮件发送失败: {str(e)}"
 
 # --- Background Scheduler (Lightweight) ---
@@ -568,23 +680,23 @@ def start_scheduler_service():
                     if should_run:
                         # Idempotent guard: prevent duplicate sends across threads/processes
                         if not acquire_daily_lock(today_str, ttl_minutes=120):
-                            print(f"[Scheduler] Skip duplicate send for {today_str} (lock exists).")
+                            log_event("WARN", f"Skip duplicate send for {today_str}")
                         else:
-                            print(f"[Scheduler] Triggering auto-analysis at {now}")
+                            log_event("INFO", "Triggering auto-analysis", {"now": str(now)})
                             success, res = analyze_market_state_logic()
                             if success:
                                 email_ok, msg = send_strategy_email(res, cfg)
                                 if email_ok:
-                                    print(f"[Scheduler] Email sent: {msg}")
+                                    log_event("INFO", "Email sent", {"to": cfg.get("email_to")})
                                     cfg = load_alert_config()
                                     cfg["last_run"] = today_str
                                     save_alert_config(cfg)
                                 else:
-                                    print(f"[Scheduler] Email failed: {msg}")
+                                    log_event("ERROR", "Email failed", {"err": msg})
                             else:
-                                print(f"[Scheduler] Analysis failed: {res}")
+                                log_event("ERROR", "Analysis failed", {"err": res})
             except Exception as e:
-                print(f"[Scheduler] Loop error: {e}")
+                log_event("ERROR", "Scheduler loop error", {"err": str(e)})
             
             time.sleep(60) # Check every minute
 
@@ -1261,6 +1373,30 @@ def determine_macro_state(row, params=None):
     else:
         return "NEUTRAL"
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_yf_with_retry(tickers, start=None, end=None, auto_adjust=False, attempts: int = 2, backoff: int = 3, interval: str = "1d"):
+    tickers_list = list(tickers) if isinstance(tickers, (list, tuple, set)) else [tickers]
+    last_err = None
+    for i in range(attempts):
+        try:
+            data_raw = yf.download(
+                tickers_list,
+                start=start,
+                end=end,
+                progress=False,
+                auto_adjust=auto_adjust,
+                timeout=12,
+                interval=interval,
+            )
+            if data_raw is not None and not data_raw.empty:
+                return data_raw
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(backoff * (i + 1))
+    log_event("ERROR", "yfinance download failed", {"tickers": tickers_list, "err": last_err})
+    return pd.DataFrame()
+
+
 @st.cache_data
 def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, use_proxies=False):
     """
@@ -1286,25 +1422,23 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
     # Added ^GSPC (S&P 500) for longer history check if IWY is missing
     # Added VUSTX (Vanguard Long-Term Treasury) for longer bond history (since 1986)
     tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD', '^GSPC', 'VUSTX']
-    try:
-        df_all = yf.download(tickers, start=fetch_start, end=fetch_end, progress=False, auto_adjust=False)
-        
-        # Handle MultiIndex
-        if isinstance(df_all.columns, pd.MultiIndex):
-            if 'Adj Close' in df_all.columns.get_level_values(0):
-                data = df_all['Adj Close']
-            elif 'Close' in df_all.columns.get_level_values(0):
-                data = df_all['Close']
-            else:
-                data = df_all
+    df_all = fetch_yf_with_retry(tickers, start=fetch_start, end=fetch_end, auto_adjust=False)
+    if df_all is None or df_all.empty:
+        return pd.DataFrame(), "Market data fetch failed or incomplete."
+
+    # Handle MultiIndex
+    if isinstance(df_all.columns, pd.MultiIndex):
+        if 'Adj Close' in df_all.columns.get_level_values(0):
+            data = df_all['Adj Close']
+        elif 'Close' in df_all.columns.get_level_values(0):
+            data = df_all['Close']
         else:
             data = df_all
-            
-        if data.empty:
-             return pd.DataFrame(), "Market data fetch failed or incomplete."
-             
-    except Exception as e:
-        return pd.DataFrame(), f"Error fetching market data: {str(e)}"
+    else:
+        data = df_all
+        
+    if data.empty:
+         return pd.DataFrame(), "Market data fetch failed or incomplete."
 
     # 2. Fetch FRED Data (UNRATE & T10Y2Y)
     try:
@@ -1699,6 +1833,35 @@ def render_factor_dashboard(metrics):
         with st.expander("🔧 动态风控触发 (Active Strategy Adjustments)", expanded=True):
             for adj in adjustments:
                 st.markdown(f"- {adj}")
+
+
+def render_data_health_badges(metrics):
+    freshness_days = metrics.get('freshness_days')
+    latest_date = metrics.get('date')
+    warnings = metrics.get('data_warnings', []) or []
+    badge = "🟢 数据最新"
+    note = f"数据截至 {latest_date}" if latest_date else "数据时间未知"
+    if freshness_days is not None:
+        note += f" ｜ 滞后 {freshness_days} 天" if freshness_days > 0 else " ｜ 当日数据"
+    if freshness_days is not None and freshness_days > 5:
+        badge = "🔴 数据已过期"
+    elif freshness_days is not None and freshness_days > 2:
+        badge = "🟡 数据待更新"
+
+    st.markdown(
+        f"""
+        <div style="padding:12px;border-radius:8px;border:1px solid #e5e7eb;background:#f8fafc;margin-bottom:12px;">
+            <div style="font-weight:700;color:#0f172a;">{badge}</div>
+            <div style="color:#475467;font-size:13px;">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if warnings:
+        with st.expander("⚠️ 数据健康提醒", expanded=False):
+            for w in warnings:
+                st.markdown(f"- {w}")
 
 def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None):
     """Renders the rebalancing table."""
@@ -2153,9 +2316,16 @@ def render_alert_config_ui():
                         "trigger_time": trigger_time.strftime("%H:%M"),
                         "last_run": config.get("last_run", "")
                     }
-                    save_alert_config(new_config)
-                    st.success("配置已保存!")
-                    st.rerun()
+                    merged, issues, warns = validate_alert_config(new_config)
+                    if issues:
+                        for i in issues:
+                            st.error(i)
+                    else:
+                        save_alert_config(merged)
+                        for w in warns:
+                            st.warning(w)
+                        st.success("配置已保存!")
+                        st.rerun()
 
         # Test Button
         if st.button("📨 立即发送测试邮件 (Send Test Email)", type="secondary"):
@@ -2203,6 +2373,7 @@ def render_state_machine_check():
                 status.update(label="诊断完成", state="complete", expanded=False)
                 
                 # Render Results
+                render_data_health_badges(metrics)
                 render_status_card(metrics['state'])
                 render_factor_dashboard(metrics)
                 
