@@ -133,3 +133,29 @@
 *   **B. 收益率曲线防御 (Yield Curve Guard)**
     *   **逻辑**: 处于衰退/震荡期且收益率曲线深度倒挂 (10Y-2Y < -0.30%)。
     *   **操作**: **MBH.SI 削减 70%**，资金移至 WTMF。
+
+---
+
+## 7. 新手指南：市场状态与应对策略 (Beginner's Guide)
+
+### 快速上手路径
+1) **识别宏观状态**：先用“状态判定逻辑”确定当前属于 6 种状态之一。
+2) **套用基础配置**：按“资产配置矩阵”得到初始目标仓位。
+3) **检查动态风控触发**：逐条核对下表的触发条件，若满足则立即执行对应调整。
+4) **执行风格/趋势过滤**：应用黄金趋势过滤、风格轮动与全局趋势过滤，得到最终持仓。
+
+### 动态风控触发一览（发生即调整）
+| 触发器 | 触发条件 | 操作 | 适用状态 |
+| :--- | :--- | :--- | :--- |
+| **VIX Booster - 加仓** | VIX < 13 | WTMF 全部转入 IWY；MBH 减半转入 IWY | 仅 NEUTRAL |
+| **VIX Booster - 减仓** | VIX > 20 | IWY 减仓 20% 转入 WTMF | 仅 NEUTRAL |
+| **Yield Curve Guard** | 10Y-2Y < -0.30% 且状态为衰退/震荡 | MBH.SI 削减 70% 转入 WTMF | DEFLATION_RECESSION, CAUTIOUS_TREND |
+| **Global Dynamic Trend Filter** | (状态 ≠ EXTREME_ACCUMULATION) 且任意资产 Price < MA200 | 清仓该资产；NEUTRAL 时若 IWY 强则转入 IWY，否则转入 WTMF；其余状态转入 WTMF | 除 EXTREME_ACCUMULATION 外 |
+| **IWY Safety Valve** | (状态 ≠ EXTREME_ACCUMULATION) 且 IWY < MA200 | IWY 削减 50%；若 VIX > 25 则削减 80%，差额转入 WTMF | 除 EXTREME_ACCUMULATION 外 |
+| **Gold Trend Filter** | 黄金 < MA200 | 清仓黄金转入 WTMF | 所有状态 |
+
+### 推荐执行顺序（手工/自动都适用）
+1) 依宏观状态给出初始权重。
+2) 检查并应用上述“动态风控触发”。
+3) 再应用风格轮动、黄金趋势过滤与全局趋势过滤。
+4) 得到最终目标持仓并下单或生成调仓指引。
