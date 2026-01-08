@@ -26,6 +26,8 @@ VIX_BOOST_LO = 13.0
 VIX_CUT_HI = 20.0
 VIX_PANIC = 25.0
 YIELD_CURVE_CUTOFF = -0.30
+SCHEDULER_LOCK = os.path.join(os.path.dirname(__file__), "data", "scheduler.lock")
+os.makedirs(os.path.dirname(SCHEDULER_LOCK), exist_ok=True)
 
 def normalize_yf_prices(df_raw):
     if df_raw is None or len(df_raw) == 0:
@@ -41,6 +43,15 @@ def normalize_yf_prices(df_raw):
     if 'Close' in df_raw.columns:
         return df_raw['Close']
     return df_raw
+
+
+def ensure_fred_cached(series_ids=("UNRATE", "T10Y2Y")):
+    """Eager-download FRED CSVs into local cache before analysis/backtest/email."""
+    for sid in series_ids:
+        try:
+            _ = fetch_fred_data(sid)
+        except Exception as e:
+            log_event("WARN", "fred_prefetch_failed", {"series": sid, "err": str(e)})
 
 def evaluate_risk_triggers(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
     if asset_trends is None:
@@ -412,11 +423,43 @@ def release_daily_lock(date_str: str):
     except Exception as e:
         print(f"[Lock] Failed to release lock: {e}")
 
+
+def is_pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def acquire_scheduler_lock(ttl_hours: int = 6) -> bool:
+    now_ts = time.time()
+    if os.path.exists(SCHEDULER_LOCK):
+        try:
+            with open(SCHEDULER_LOCK, "r") as f:
+                content = f.read().strip().split(",")
+            pid = int(content[0]) if content and content[0].isdigit() else None
+            ts = float(content[1]) if len(content) > 1 else 0
+            if pid and is_pid_running(pid):
+                # If lock is fresh and pid alive, refuse
+                if now_ts - ts < ttl_hours * 3600:
+                    return False
+        except Exception:
+            pass
+    try:
+        with open(SCHEDULER_LOCK, "w") as f:
+            f.write(f"{os.getpid()},{now_ts}")
+        return True
+    except Exception as e:
+        print(f"[Lock] Failed to write scheduler lock: {e}")
+        return False
+
 def analyze_market_state_logic():
     """
     Core logic to fetch data and determine current market state.
     Returns: (success, result_dict_or_error_msg)
     """
+    ensure_fred_cached()
     end = datetime.date.today()
     start = end - datetime.timedelta(days=365*3)
     
@@ -584,6 +627,7 @@ def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_dat
 
 def send_strategy_email(metrics, config):
     """发送策略分析邮件，返回 (success, message)。"""
+    ensure_fred_cached()
     email_to = str(config.get("email_to", "")).strip()
     email_from = str(config.get("email_from", "")).strip()
     email_pwd = config.get("email_pwd", "")
@@ -666,6 +710,10 @@ def start_scheduler_service():
     if st.session_state.get("_scheduler_started"):
         return scheduler_thread
 
+    if not acquire_scheduler_lock(ttl_hours=6):
+        print("[Scheduler] Lock held by another process/session; skip start.")
+        return scheduler_thread
+
     def run_scheduler_check():
         """Checks if alert needs to be sent. Runs in background thread."""
         while True:
@@ -699,24 +747,24 @@ def start_scheduler_service():
                             if now.weekday() == 0 and last_run_str != today_str:
                                 should_run = True
                     
-                    if should_run:
-                        # Idempotent guard: prevent duplicate sends across threads/processes
-                        if not acquire_daily_lock(today_str, ttl_minutes=120):
-                            log_event("WARN", f"Skip duplicate send for {today_str}")
-                        else:
-                            log_event("INFO", "Triggering auto-analysis", {"now": str(now)})
-                            success, res = analyze_market_state_logic()
-                            if success:
-                                email_ok, msg = send_strategy_email(res, cfg)
-                                if email_ok:
-                                    log_event("INFO", "Email sent", {"to": cfg.get("email_to")})
-                                    cfg = load_alert_config()
-                                    cfg["last_run"] = today_str
-                                    save_alert_config(cfg)
-                                else:
-                                    log_event("ERROR", "Email failed", {"err": msg})
+                        if should_run:
+                            # Idempotent guard: prevent duplicate sends across threads/processes (24h)
+                            if not acquire_daily_lock(today_str, ttl_minutes=1440):
+                                log_event("WARN", f"Skip duplicate send for {today_str}")
                             else:
-                                log_event("ERROR", "Analysis failed", {"err": res})
+                                log_event("INFO", "Triggering auto-analysis", {"now": str(now)})
+                                success, res = analyze_market_state_logic()
+                                if success:
+                                    email_ok, msg = send_strategy_email(res, cfg)
+                                    if email_ok:
+                                        log_event("INFO", "Email sent", {"to": cfg.get("email_to")})
+                                        cfg = load_alert_config()
+                                        cfg["last_run"] = today_str
+                                        save_alert_config(cfg)
+                                    else:
+                                        log_event("ERROR", "Email failed", {"err": msg})
+                                else:
+                                    log_event("ERROR", "Analysis failed", {"err": res})
             except Exception as e:
                 log_event("ERROR", "Scheduler loop error", {"err": str(e)})
             
@@ -977,6 +1025,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     Simulates the strategy over historical states.
     df_states: DataFrame with 'State', 'Gold_Bear', 'Value_Regime' columns, indexed by Date.
     """
+    ensure_fred_cached()
     # 1. Define Asset Universe
     # If using proxies (for long-term history > 20 years), we map ETFs to Indices
     if use_proxies:
