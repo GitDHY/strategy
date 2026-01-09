@@ -1121,10 +1121,11 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
 
     return results
 
-def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0, ma_window=200, use_proxies=False):
+def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0, ma_window=200, use_proxies=False, rebal_freq='Daily'):
     """
     Simulates the strategy over historical states.
     df_states: DataFrame with 'State', 'Gold_Bear', 'Value_Regime' columns, indexed by Date.
+    rebal_freq: 'Daily', 'Weekly', 'Monthly', 'Quarterly'
     """
     ensure_fred_cached()
     # 1. Define Asset Universe
@@ -1195,9 +1196,29 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     
     # We iterate daily. To speed up, we could vectorise, but logic is complex.
     # Logic: Daily return = Sum(Weight_i * Return_i)
-    # This assumes we rebalance to target weights DAILY.
+    # Rebalancing frequency controls when we update target weights.
     
     returns_df = price_data.pct_change().fillna(0)
+    
+    # Determine rebalancing dates based on frequency
+    def is_rebalance_day(date, freq, prev_date=None):
+        """Check if current date is a rebalancing day."""
+        if freq == 'Daily':
+            return True
+        elif freq == 'Weekly':
+            # Rebalance on Monday (weekday=0)
+            return date.weekday() == 0
+        elif freq == 'Monthly':
+            # Rebalance on first trading day of month
+            if prev_date is None:
+                return True
+            return date.month != prev_date.month
+        elif freq == 'Quarterly':
+            # Rebalance on first trading day of quarter
+            if prev_date is None:
+                return True
+            return (date.month - 1) // 3 != (prev_date.month - 1) // 3
+        return True
     
     # Proxy Mapper Function
     def map_target_to_asset(target_ticker, current_date=None):
@@ -1219,6 +1240,9 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             return 'CASH' # Simulate Cash for managed futures in proxy mode
         return target_ticker
 
+    prev_date = None
+    current_weights = {}  # Actual portfolio weights (may drift between rebalances)
+    
     for date, row in df_states.iterrows():
         # Get Targets for today (based on today's state)
         # Note: In reality, we trade tomorrow based on today's close state?
@@ -1226,6 +1250,9 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         s = row['State']
         gb = row['Gold_Bear']
         vr = row['Value_Regime']
+        
+        # Check if this is a rebalancing day
+        should_rebalance = is_rebalance_day(date, rebal_freq, prev_date)
         
         # Get trends for this date
         daily_trends = {}
@@ -1266,43 +1293,35 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         
         vix_val = row.get('VIX')
         yc_val = row.get('YieldCurve')
+        
+        # Calculate target weights (only used on rebalance days)
         targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends, vix=vix_val, yield_curve=yc_val)
         
         # --- Map Targets to Available Assets (Proxy Translation) ---
-        final_weights = {}
+        new_target_weights = {}
         for t, w in targets.items():
             mapped_asset = map_target_to_asset(t, date)
             if mapped_asset == 'CASH':
                 # Cash means 0 return, we just don't invest it
                 pass 
             elif mapped_asset in price_data.columns:
-                final_weights[mapped_asset] = final_weights.get(mapped_asset, 0.0) + w
+                new_target_weights[mapped_asset] = new_target_weights.get(mapped_asset, 0.0) + w
             else:
                 # If mapped asset missing (e.g. TLT before 2002), hold Cash
                 pass
         
-        # --- Calculate Turnover (Trading Volume) ---
-        # Compare current 'targets' with 'prev_targets' adjusted for drift
-        daily_turnover = 0.0
-        
-        if not prev_targets:
-            # First day: turnover is the sum of all positions (building portfolio)
-            daily_turnover = sum(final_weights.values())
-        else:
+        # --- Calculate Drifted Weights from previous day ---
+        drifted_weights = {}
+        if prev_targets:
             # Calculate "Drifted Weights" from previous day
             # Formula: W_drifted_i = W_prev_i * (1 + r_i) / (1 + R_port)
-            # R_port = Sum(W_prev_i * r_i) + W_cash * 0
-            
-            # 1. Calculate value of each component after drift
             drifted_values = {}
             total_drifted_val = 0.0
             
-            # Assets
             for t, w in prev_targets.items():
                 r = 0.0
                 if prev_rets is not None and t in prev_rets:
                     r = prev_rets[t]
-                
                 val = w * (1 + r)
                 drifted_values[t] = val
                 total_drifted_val += val
@@ -1312,15 +1331,28 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             drifted_cash_val = prev_cash_w * 1.0 # Cash return 0
             total_drifted_val += drifted_cash_val
             
-            # 2. Normalize to get Drifted Weights
+            # Normalize to get Drifted Weights
             if total_drifted_val > 0:
                 drifted_weights = {t: v / total_drifted_val for t, v in drifted_values.items()}
-                drifted_cash_w = drifted_cash_val / total_drifted_val
             else:
-                drifted_weights = prev_targets
-                drifted_cash_w = prev_cash_w
-
-            # 3. Compare with New Targets
+                drifted_weights = prev_targets.copy()
+        
+        # --- Determine actual weights for today ---
+        if should_rebalance or not prev_targets:
+            # Rebalance to new target weights
+            final_weights = new_target_weights
+        else:
+            # Keep drifted weights (no rebalancing)
+            final_weights = drifted_weights
+        
+        # --- Calculate Turnover (Trading Volume) ---
+        daily_turnover = 0.0
+        
+        if not prev_targets:
+            # First day: turnover is the sum of all positions (building portfolio)
+            daily_turnover = sum(final_weights.values())
+        elif should_rebalance:
+            # Only count turnover on rebalance days
             diff_sum = 0.0
             all_assets = set(final_weights.keys()) | set(drifted_weights.keys())
             
@@ -1331,7 +1363,8 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             
             # Don't forget Cash difference
             curr_cash_w = max(0.0, 1.0 - sum(final_weights.values()))
-            diff_sum += abs(curr_cash_w - drifted_cash_w)
+            prev_cash_w = max(0.0, 1.0 - sum(drifted_weights.values())) if drifted_weights else 0
+            diff_sum += abs(curr_cash_w - prev_cash_w)
             
             daily_turnover = diff_sum / 2.0 # One-sided turnover
             
@@ -1340,6 +1373,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         rec['Date'] = date
         rec['State'] = s
         rec['Turnover'] = daily_turnover
+        rec['Rebalanced'] = should_rebalance or not prev_targets
         history_records.append(rec)
         
         # Calculate Portfolio Return for this day
@@ -1358,6 +1392,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         # Prepare for next iteration
         prev_targets = final_weights
         prev_rets = current_rets
+        prev_date = date
 
         
     s_strategy = pd.Series(portfolio_values, index=df_states.index, name="Strategy")
@@ -1485,6 +1520,102 @@ ASSET_NAMES = {
     'SPY': '标普500 (S&P 500)',
     'OTHERS': '其他/待清理资产 (Others)'
 }
+
+# --- Utility Functions for Backtest ---
+def safe_div(a, b, default=0.0):
+    """Safe division to avoid ZeroDivisionError."""
+    return a / b if b != 0 else default
+
+def get_state_segments(df, state_col='State'):
+    """
+    Extract state segments from a DataFrame with state column.
+    Returns DataFrame with columns: grp, State, Start, End, Duration
+    """
+    if df is None or df.empty or state_col not in df.columns:
+        return pd.DataFrame()
+    df_copy = df.copy()
+    df_copy['state_grp'] = (df_copy[state_col] != df_copy[state_col].shift()).cumsum()
+    segments = df_copy.groupby(['state_grp', state_col]).agg(
+        Start=(state_col, lambda x: x.index[0]),
+        End=(state_col, lambda x: x.index[-1])
+    ).reset_index()
+    segments.columns = ['grp', 'State', 'Start', 'End']
+    segments['Duration'] = (segments['End'] - segments['Start']).dt.days + 1
+    return segments
+
+def validate_date_range(start_date, end_date, min_days=30):
+    """
+    Validate date range for backtest.
+    Returns (is_valid, error_message)
+    """
+    if start_date is None or end_date is None:
+        return False, "请选择有效的日期范围"
+    if start_date >= end_date:
+        return False, "结束日期必须晚于开始日期"
+    if (end_date - start_date).days < min_days:
+        return False, f"回测周期至少需要 {min_days} 天"
+    return True, None
+
+def normalize_weights(weights_dict):
+    """
+    Normalize weights to sum to 1.0, handling edge cases.
+    """
+    if not weights_dict:
+        return {}
+    total = sum(weights_dict.values())
+    if total <= 0:
+        return {k: 0.0 for k in weights_dict}
+    return {k: v / total for k, v in weights_dict.items()}
+
+def calculate_state_transition_matrix(df_states, state_col='State'):
+    """
+    Calculate state transition matrix from state history.
+    Returns DataFrame with transition counts and probabilities.
+    """
+    if df_states is None or df_states.empty or state_col not in df_states.columns:
+        return None, None
+    states = df_states[state_col]
+    transitions = pd.crosstab(states.shift(1), states, dropna=True)
+    # Normalize to probabilities
+    trans_prob = transitions.div(transitions.sum(axis=1), axis=0).fillna(0)
+    return transitions, trans_prob
+
+def calculate_state_statistics(df_history, state_col='State'):
+    """
+    Calculate statistics for each state: count, avg duration, total days.
+    """
+    segments = get_state_segments(df_history, state_col)
+    if segments.empty:
+        return pd.DataFrame()
+    stats = segments.groupby('State').agg(
+        Occurrences=('grp', 'count'),
+        AvgDuration=('Duration', 'mean'),
+        TotalDays=('Duration', 'sum'),
+        MinDuration=('Duration', 'min'),
+        MaxDuration=('Duration', 'max')
+    ).round(1)
+    return stats
+
+def calculate_state_returns(df_history, returns_series, state_col='State'):
+    """
+    Calculate return statistics by state.
+    """
+    if df_history is None or df_history.empty or returns_series is None or returns_series.empty:
+        return pd.DataFrame()
+    # Align indices
+    common_idx = df_history.index.intersection(returns_series.index)
+    if len(common_idx) == 0:
+        return pd.DataFrame()
+    states = df_history.loc[common_idx, state_col]
+    rets = returns_series.loc[common_idx]
+    
+    result = rets.groupby(states).agg(['mean', 'std', 'sum', 'count'])
+    result.columns = ['AvgDailyRet', 'StdDev', 'CumulativeRet', 'Days']
+    result['AvgDailyRet'] = result['AvgDailyRet'] * 100  # Convert to %
+    result['StdDev'] = result['StdDev'] * 100
+    result['CumulativeRet'] = result['CumulativeRet'] * 100
+    result['AnnualizedRet'] = result['AvgDailyRet'] * 252
+    return result.round(2)
 
 def determine_macro_state(row, params=None):
     """
@@ -2188,25 +2319,29 @@ def render_historical_backtest_section():
     st.markdown("---")
     st.markdown("### 🕰️ 历史状态回溯与策略仿真")
     
+    # --- Initialize all session state at the top ---
+    session_defaults = {
+        "bt_use_proxies": False,
+        "bt_ma_window": 200,
+        "bt_p_sahm": 0.50,
+        "bt_p_vix_panic": 32,
+        "bt_p_vix_rec": 35,
+        "bt_rebal_freq": "Daily",
+        "bt_cost_bps": 10,
+    }
+    for key, val in session_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
+    
     # --- Advanced Settings (Sensitivity & Proxies) ---
     with st.expander("⚙️ 高级回测设置 (参数敏感性与样本外测试)", expanded=False):
-        # Initialize Session State for Widgets to avoid warnings
-        if "bt_use_proxies" not in st.session_state: st.session_state["bt_use_proxies"] = False
-        if "bt_ma_window" not in st.session_state: st.session_state["bt_ma_window"] = 200
-        if "bt_p_sahm" not in st.session_state: st.session_state["bt_p_sahm"] = 0.50
-        if "bt_p_vix_panic" not in st.session_state: st.session_state["bt_p_vix_panic"] = 32
-        if "bt_p_vix_rec" not in st.session_state: st.session_state["bt_p_vix_rec"] = 35
-
         # Reset Button
         if st.button("🔄 恢复默认设置"):
-            st.session_state["bt_use_proxies"] = False
-            st.session_state["bt_ma_window"] = 200
-            st.session_state["bt_p_sahm"] = 0.50
-            st.session_state["bt_p_vix_panic"] = 32
-            st.session_state["bt_p_vix_rec"] = 35
+            for key, val in session_defaults.items():
+                st.session_state[key] = val
             st.rerun()
 
-        c_adv1, c_adv2 = st.columns(2)
+        c_adv1, c_adv2, c_adv3 = st.columns(3)
         with c_adv1:
             st.markdown("**1. 样本外测试 (Out-of-Sample)**")
             use_proxies = st.checkbox("启用代理资产 (Use Proxies)", help="使用 S&P500, VUSTX(1986+), GC=F 等替代 ETF 以支持更长历史回测 (1990+)。", key="bt_use_proxies")
@@ -2217,6 +2352,11 @@ def render_historical_backtest_section():
             p_sahm = st.number_input("Sahm Rule", step=0.01, format="%.2f", key="bt_p_sahm")
             p_vix_panic = st.number_input("VIX Panic", step=1, key="bt_p_vix_panic")
             p_vix_rec = st.number_input("VIX Recession", step=1, key="bt_p_vix_rec")
+        
+        with c_adv3:
+            st.markdown("**3. 交易参数 (Trading)**")
+            rebal_freq = st.selectbox("再平衡频率", ["Daily", "Weekly", "Monthly", "Quarterly"], key="bt_rebal_freq", help="Daily=每日, Weekly=每周一, Monthly=每月初, Quarterly=每季度初")
+            cost_bps = st.number_input("交易成本 (bps)", min_value=0, max_value=100, step=5, key="bt_cost_bps", help="单边交易成本，默认 10bps = 0.1%")
     
     # Construct params dict
     custom_params = {
@@ -2240,12 +2380,22 @@ def render_historical_backtest_section():
     with c3:
         st.write(""); st.write("")
         run = st.button("🚀 运行回测", type="primary")
+    
+    # --- Date Validation ---
+    if run:
+        if not isinstance(dates, (tuple, list)) or len(dates) != 2:
+            st.error("请选择有效的日期范围（开始日期和结束日期）")
+            return
+        is_valid, err_msg = validate_date_range(dates[0], dates[1], min_days=30)
+        if not is_valid:
+            st.error(err_msg)
+            return
         
-    if run and isinstance(dates, tuple) and len(dates)==2:
+    if run and isinstance(dates, (tuple, list)) and len(dates)==2:
         with st.spinner("回测中..."):
             df_states, err = get_historical_macro_data(dates[0], dates[1], ma_window=int(ma_window), params=custom_params, use_proxies=use_proxies)
             if not df_states.empty:
-                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies)
+                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies, rebal_freq=rebal_freq)
                 if res is not None:
                     # Metrics & Charts (Simplified for brevity as logic exists in run_dynamic_backtest return)
                     st.success("回测完成")
@@ -2441,14 +2591,12 @@ def render_historical_backtest_section():
                             avg_daily_turnover = turnover_series.mean()
                             annual_turnover = avg_daily_turnover * 252
                             
-                            # Est Cost (bps)
-                            cost_bps = 10 # 0.10% per side
+                            # Est Cost (use user-defined cost_bps)
                             total_cost_est = total_turnover * (cost_bps / 10000)
                             annual_cost_est = annual_turnover * (cost_bps / 10000)
                             
                             # Avg Holding Period (Days)
-                            # Formula: 1 / Daily Turnover (approx)
-                            avg_hold_days = 1 / avg_daily_turnover if avg_daily_turnover > 0 else 0
+                            avg_hold_days = safe_div(1, avg_daily_turnover, 0)
                         else:
                             annual_turnover = 0
                             annual_cost_est = 0
@@ -2464,8 +2612,26 @@ def render_historical_backtest_section():
                         with c4:
                             # Trading Frequency (Days with > 1% turnover)
                             active_days = df_history[df_history['Turnover'] > 0.01].count()['Turnover']
-                            freq_pct = active_days / total_days if total_days > 0 else 0
+                            freq_pct = safe_div(active_days, total_days, 0)
                             st.metric("活跃交易频率", f"{freq_pct:.1%}", help="日换手率超过 1% 的天数比例")
+
+                        # Cost Sensitivity Analysis
+                        st.markdown("**交易成本敏感性分析 (Cost Sensitivity)**")
+                        cost_levels = [5, 10, 15, 20, 30]
+                        cost_impact = []
+                        for c_bps in cost_levels:
+                            annual_drag = annual_turnover * (c_bps / 10000) * 100  # Convert to %
+                            cost_impact.append({'成本(bps)': c_bps, '年化拖累%': annual_drag})
+                        df_cost = pd.DataFrame(cost_impact)
+                        
+                        c_sens1, c_sens2 = st.columns([1, 2])
+                        with c_sens1:
+                            st.dataframe(df_cost.style.format({'年化拖累%': '{:.2f}%'}), use_container_width=True, hide_index=True)
+                        with c_sens2:
+                            fig_cost = go.Figure()
+                            fig_cost.add_trace(go.Bar(x=df_cost['成本(bps)'].astype(str) + ' bps', y=df_cost['年化拖累%'], marker_color='#ff7043'))
+                            fig_cost.update_layout(title="不同成本水平下的年化拖累", yaxis_title="年化拖累%", template="plotly_white", height=250)
+                            st.plotly_chart(fig_cost, use_container_width=True)
 
                         # Chart: Rolling Turnover
                         # st.bar_chart(df_history['Turnover']) # Simple bar
@@ -2479,6 +2645,186 @@ def render_historical_backtest_section():
                             height=300
                         )
                         st.plotly_chart(fig_to, use_container_width=True)
+                    
+                    # --- 5. State Transition Analysis ---
+                    st.markdown("---")
+                    st.markdown("#### 🔄 状态转换分析 (State Transition Analysis)")
+                    
+                    if df_history is not None and not df_history.empty and 'State' in df_history.columns:
+                        tab_trans, tab_attr, tab_yearly = st.tabs(["状态转换矩阵", "收益归因", "分年度收益"])
+                        
+                        with tab_trans:
+                            # State Transition Matrix
+                            trans_counts, trans_probs = calculate_state_transition_matrix(df_history, 'State')
+                            if trans_counts is not None and trans_probs is not None and not trans_counts.empty:
+                                c_mat1, c_mat2 = st.columns(2)
+                                with c_mat1:
+                                    st.markdown("**转换次数 (Counts)**")
+                                    st.dataframe(trans_counts.style.background_gradient(cmap='Blues'), use_container_width=True)
+                                with c_mat2:
+                                    st.markdown("**转换概率 (Probabilities)**")
+                                    st.dataframe(trans_probs.style.background_gradient(cmap='Greens', vmin=0, vmax=1).format("{:.1%}"), use_container_width=True)
+                                
+                                # State Statistics
+                                st.markdown("**状态统计 (State Statistics)**")
+                                state_stats = calculate_state_statistics(df_history, 'State')
+                                if not state_stats.empty:
+                                    state_stats_display = state_stats.copy()
+                                    state_stats_display.columns = ['出现次数', '平均持续(天)', '总天数', '最短(天)', '最长(天)']
+                                    st.dataframe(state_stats_display, use_container_width=True)
+                                    
+                                    # Duration Distribution Chart
+                                    segments = get_state_segments(df_history, 'State')
+                                    if not segments.empty:
+                                        fig_dur = go.Figure()
+                                        for state in segments['State'].unique():
+                                            durations = segments[segments['State'] == state]['Duration']
+                                            s_conf = MACRO_STATES.get(state, MACRO_STATES["NEUTRAL"])
+                                            fig_dur.add_trace(go.Box(y=durations, name=f"{s_conf['icon']} {state}", marker_color=s_conf['border_color']))
+                                        fig_dur.update_layout(title="状态持续时间分布 (Duration Distribution)", yaxis_title="天数", template="plotly_white", height=350)
+                                        st.plotly_chart(fig_dur, use_container_width=True)
+                            else:
+                                st.info("状态数据不足以生成转换矩阵")
+                        
+                        with tab_attr:
+                            # Attribution Analysis by State
+                            if 'Dynamic Strategy' in res.columns:
+                                daily_rets = res['Dynamic Strategy'].pct_change().dropna()
+                                state_rets = calculate_state_returns(df_history, daily_rets, 'State')
+                                if not state_rets.empty:
+                                    st.markdown("**按状态收益归因 (Returns by State)**")
+                                    state_rets_display = state_rets.copy()
+                                    state_rets_display.columns = ['日均收益%', '标准差%', '累计收益%', '天数', '年化收益%']
+                                    st.dataframe(state_rets_display.style.background_gradient(subset=['累计收益%'], cmap='RdYlGn'), use_container_width=True)
+                                    
+                                    # Contribution Bar Chart
+                                    fig_attr = go.Figure()
+                                    for state in state_rets.index:
+                                        s_conf = MACRO_STATES.get(state, MACRO_STATES["NEUTRAL"])
+                                        fig_attr.add_trace(go.Bar(
+                                            x=[f"{s_conf['icon']} {state}"],
+                                            y=[state_rets.loc[state, 'CumulativeRet']],
+                                            name=state,
+                                            marker_color=s_conf['border_color']
+                                        ))
+                                    fig_attr.update_layout(title="各状态收益贡献 (Contribution by State)", yaxis_title="累计收益%", template="plotly_white", showlegend=False, height=350)
+                                    st.plotly_chart(fig_attr, use_container_width=True)
+                                else:
+                                    st.info("无法计算收益归因")
+                            else:
+                                st.info("需要 Dynamic Strategy 列来计算归因")
+                        
+                        with tab_yearly:
+                            # Yearly Returns Table
+                            if 'Dynamic Strategy' in res.columns:
+                                # Calculate yearly returns
+                                yearly_data = []
+                                for col in res.columns:
+                                    yearly_rets = res[col].resample('Y').last().pct_change().dropna() * 100
+                                    for yr, ret in yearly_rets.items():
+                                        yearly_data.append({'策略': col, '年份': yr.year, '收益率%': ret})
+                                
+                                if yearly_data:
+                                    df_yearly = pd.DataFrame(yearly_data)
+                                    df_yearly_pivot = df_yearly.pivot(index='年份', columns='策略', values='收益率%')
+                                    
+                                    st.markdown("**分年度收益率 (Yearly Returns)**")
+                                    st.dataframe(df_yearly_pivot.style.background_gradient(cmap='RdYlGn', axis=None).format("{:.2f}%"), use_container_width=True)
+                                    
+                                    # Yearly Bar Chart
+                                    fig_yearly = go.Figure()
+                                    for col in df_yearly_pivot.columns:
+                                        fig_yearly.add_trace(go.Bar(x=df_yearly_pivot.index.astype(str), y=df_yearly_pivot[col], name=col))
+                                    fig_yearly.update_layout(title="分年度收益对比 (Yearly Returns Comparison)", yaxis_title="收益率%", barmode='group', template="plotly_white", height=400)
+                                    st.plotly_chart(fig_yearly, use_container_width=True)
+                                    
+                                    # Monthly Heatmap for Dynamic Strategy
+                                    st.markdown("**月度收益热力图 (Monthly Returns Heatmap)**")
+                                    daily_s = res['Dynamic Strategy']
+                                    if len(daily_s) > 30:
+                                        monthly_rets = daily_s.resample('M').last().pct_change().dropna() * 100
+                                        if len(monthly_rets) > 0:
+                                            monthly_df = pd.DataFrame({
+                                                'Year': monthly_rets.index.year,
+                                                'Month': monthly_rets.index.month,
+                                                'Return': monthly_rets.values
+                                            })
+                                            monthly_pivot = monthly_df.pivot(index='Year', columns='Month', values='Return')
+                                            monthly_pivot.columns = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][:len(monthly_pivot.columns)]
+                                            
+                                            fig_heat = go.Figure(data=go.Heatmap(
+                                                z=monthly_pivot.values,
+                                                x=monthly_pivot.columns,
+                                                y=monthly_pivot.index.astype(str),
+                                                colorscale='RdYlGn',
+                                                zmid=0,
+                                                text=np.round(monthly_pivot.values, 1),
+                                                texttemplate="%{text}%",
+                                                hovertemplate="Year: %{y}<br>Month: %{x}<br>Return: %{z:.2f}%<extra></extra>"
+                                            ))
+                                            fig_heat.update_layout(title="Dynamic Strategy 月度收益", template="plotly_white", height=max(300, len(monthly_pivot) * 30))
+                                            st.plotly_chart(fig_heat, use_container_width=True)
+                                else:
+                                    st.info("回测周期不足一年，无法生成年度数据")
+                            else:
+                                st.info("需要策略数据来生成年度收益")
+                    
+                    # --- 6. Export Options ---
+                    st.markdown("---")
+                    st.markdown("#### 📤 导出回测结果 (Export Results)")
+                    
+                    c_exp1, c_exp2, c_exp3 = st.columns(3)
+                    with c_exp1:
+                        # Export Net Value Curve
+                        csv_nv = res.to_csv()
+                        st.download_button(
+                            label="📈 下载净值曲线 (CSV)",
+                            data=csv_nv,
+                            file_name=f"backtest_nav_{dates[0]}_{dates[1]}.csv",
+                            mime="text/csv"
+                        )
+                    with c_exp2:
+                        # Export Allocation History
+                        if df_history is not None and not df_history.empty:
+                            csv_alloc = df_history.to_csv()
+                            st.download_button(
+                                label="📊 下载持仓历史 (CSV)",
+                                data=csv_alloc,
+                                file_name=f"backtest_allocation_{dates[0]}_{dates[1]}.csv",
+                                mime="text/csv"
+                            )
+                    with c_exp3:
+                        # Export Summary Report
+                        report_lines = [
+                            f"回测报告 - {dates[0]} 至 {dates[1]}",
+                            f"生成时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                            "",
+                            "=== 参数设置 ===",
+                            f"初始资金: {cap:,.0f}",
+                            f"动量窗口: {ma_window}",
+                            f"使用代理资产: {'是' if use_proxies else '否'}",
+                            f"再平衡频率: {rebal_freq}",
+                            f"交易成本: {cost_bps}bps",
+                            "",
+                            "=== 性能指标 ===",
+                        ]
+                        for _, row in df_metrics.iterrows():
+                            report_lines.append(f"\n{row['Strategy']}:")
+                            for col in df_metrics.columns:
+                                if col != 'Strategy':
+                                    val = row[col]
+                                    if isinstance(val, float):
+                                        report_lines.append(f"  {col}: {val:.2f}")
+                                    else:
+                                        report_lines.append(f"  {col}: {val}")
+                        
+                        report_text = "\n".join(report_lines)
+                        st.download_button(
+                            label="📝 下载摘要报告 (TXT)",
+                            data=report_text,
+                            file_name=f"backtest_report_{dates[0]}_{dates[1]}.txt",
+                            mime="text/plain"
+                        )
                     
             else:
                 msg = err if err else "该时间段内无有效数据 (可能是因为数据源不足，请尝试勾选 'Use Proxies' 或缩短时间范围)"
