@@ -27,7 +27,9 @@ VIX_CUT_HI = 20.0
 VIX_PANIC = 25.0
 YIELD_CURVE_CUTOFF = -0.30
 SCHEDULER_LOCK = os.path.join(os.path.dirname(__file__), "data", "scheduler.lock")
+STATE_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "data", "state_history.json")
 os.makedirs(os.path.dirname(SCHEDULER_LOCK), exist_ok=True)
+os.makedirs(os.path.dirname(STATE_HISTORY_FILE), exist_ok=True)
 
 def normalize_yf_prices(df_raw):
     if df_raw is None or len(df_raw) == 0:
@@ -257,6 +259,15 @@ DEFAULT_ALERT_CONFIG = {
     "frequency": "Manual",  # Manual, Daily, Weekly
     "trigger_time": "09:30",  # Singapore Time (UTC+8)
     "last_run": "",
+    # New: real-time risk alerts
+    "state_change_alert": False,
+    "vix_alert_enabled": False,
+    "vix_alert_threshold": 35,
+    "channels": {
+        "telegram_bot_token": "",
+        "telegram_chat_id": "",
+        "wechat_webhook": ""
+    }
 }
 
 def load_alert_config():
@@ -305,6 +316,67 @@ def log_event(level: str, message: str, extra=None):
         print(f"[{level}] {message} | extra={extra}")
 
 
+def load_state_history():
+    try:
+        if os.path.exists(STATE_HISTORY_FILE):
+            with open(STATE_HISTORY_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+    except Exception as e:
+        log_event("ERROR", "state_history_load_failed", {"err": str(e)})
+    return []
+
+
+def save_state_history(history):
+    try:
+        with open(STATE_HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        log_event("ERROR", "state_history_save_failed", {"err": str(e)})
+
+
+def record_state_history(state, metrics):
+    history = load_state_history()
+    date_str = metrics.get('date') or datetime.date.today().isoformat()
+    fetch_ts = metrics.get('fetch_ts') or datetime.datetime.now().isoformat(timespec='seconds')
+    entry = {"date": date_str, "state": state, "ts": fetch_ts}
+
+    if history and history[-1].get("date") == date_str:
+        history[-1] = entry
+    else:
+        history.append(entry)
+    save_state_history(history)
+    return history
+
+
+def get_state_change_info(history, current_state, current_date):
+    if not current_date:
+        return None
+    streak_start = current_date
+    prev_state = None
+    prev_date = None
+    for item in reversed(history):
+        try:
+            d = datetime.date.fromisoformat(item.get("date")) if item.get("date") else None
+        except Exception:
+            continue
+        if item.get("state") == current_state:
+            streak_start = d
+        else:
+            prev_state = item.get("state")
+            prev_date = d
+            break
+    days_in_state = (current_date - streak_start).days + 1 if streak_start else None
+    changed_on = streak_start
+    return {
+        "prev_state": prev_state,
+        "prev_date": prev_date,
+        "changed_on": changed_on,
+        "days_in_state": days_in_state,
+    }
+
+
 def validate_alert_config(cfg: dict):
     merged = DEFAULT_ALERT_CONFIG.copy()
     issues = []
@@ -351,6 +423,25 @@ def validate_alert_config(cfg: dict):
 
     # Enabled flag
     merged["enabled"] = bool(merged.get("enabled", False))
+
+    # Realtime alert controls
+    merged["state_change_alert"] = bool(merged.get("state_change_alert", False))
+    merged["vix_alert_enabled"] = bool(merged.get("vix_alert_enabled", False))
+    try:
+        merged["vix_alert_threshold"] = float(merged.get("vix_alert_threshold", 35))
+    except Exception:
+        merged["vix_alert_threshold"] = 35
+        warns.append("VIX 阈值无效，已回退 35")
+
+    # Channels placeholder (Telegram / WeCom)
+    channels = merged.get("channels", {}) or {}
+    if not isinstance(channels, dict):
+        channels = {}
+    merged["channels"] = {
+        "telegram_bot_token": channels.get("telegram_bot_token", ""),
+        "telegram_chat_id": channels.get("telegram_chat_id", ""),
+        "wechat_webhook": channels.get("wechat_webhook", ""),
+    }
 
     return merged, issues, warns
 
@@ -520,6 +611,9 @@ def analyze_market_state_logic():
         current_yc = yc_series.iloc[-1]
         yc_un_invert = (current_yc < 0.2) and (recent_min < -0.2)
 
+    factor_cols = [c for c in ["VIX", "YieldCurve", "Corr", "Sahm", "RateShock"] if c in df_hist.columns]
+    factor_trends = df_hist[factor_cols].tail(90) if factor_cols else pd.DataFrame()
+
     metrics = {
         'date': last_row.name.strftime('%Y-%m-%d'),
         'state': state,
@@ -538,10 +632,17 @@ def analyze_market_state_logic():
         'asset_trends': asset_trends,
         'freshness_days': freshness_days,
         'latest_date': last_row.name.date() if hasattr(last_row, 'name') else None,
-        'data_warnings': data_warnings
+        'data_warnings': data_warnings,
+        'factor_trends': factor_trends,
+        'fetch_ts': datetime.datetime.now().isoformat(timespec='seconds')
     }
     
     return True, metrics
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def analyze_market_state_logic_cached():
+    return analyze_market_state_logic()
 
 
 def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date):
@@ -1445,6 +1546,37 @@ def fetch_yf_with_retry(tickers, start=None, end=None, auto_adjust=False, attemp
     return pd.DataFrame()
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def get_live_prices(tickers):
+    tickers_list = [t for t in (list(tickers) if isinstance(tickers, (list, tuple, set)) else [tickers]) if t]
+    if not tickers_list:
+        return {}
+    end = datetime.date.today() + datetime.timedelta(days=1)
+    start = end - datetime.timedelta(days=7)
+    df_raw = fetch_yf_with_retry(tickers_list, start=start, end=end, auto_adjust=False)
+    if df_raw is None or df_raw.empty:
+        return {}
+    df = normalize_yf_prices(df_raw).ffill().tail(2)
+    if df.empty:
+        return {}
+    latest = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else df.iloc[-1]
+    out = {}
+    for t in tickers_list:
+        try:
+            p = latest.get(t)
+            prev_p = prev.get(t)
+            if pd.isna(p):
+                continue
+            change_pct = None
+            if prev_p and not pd.isna(prev_p) and prev_p != 0:
+                change_pct = (p - prev_p) / prev_p * 100
+            out[t] = {"price": float(p), "change_pct": float(change_pct) if change_pct is not None else None}
+        except Exception:
+            continue
+    return out
+
+
 @st.cache_data
 def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, use_proxies=False):
     """
@@ -1784,7 +1916,7 @@ def render_holdings_input():
     """Renders the holdings input section and returns the total value."""
     with st.expander("💼 输入当前持仓 (Current Portfolio)", expanded=True):
         st.markdown("请输入当前账户各标的的**市值 (Value)**。")
-        cols = st.columns(4)
+        cols = st.columns(2)
         
         inputs = [
             ("IWY (美股成长)", "hold_IWY"), ("WTMF (危机Alpha)", "hold_WTMF"),
@@ -1799,7 +1931,7 @@ def render_holdings_input():
             if key not in st.session_state: st.session_state[key] = 0.0
             
         for i, (label, key) in enumerate(inputs):
-            with cols[i % 4]:
+            with cols[i % 2]:
                 st.number_input(label, step=100.0, key=key)
         
         current_holdings = {k.replace("hold_", ""): st.session_state[k] for _, k in inputs}
@@ -1819,31 +1951,75 @@ def render_status_card(state):
     """, unsafe_allow_html=True)
 
 def render_factor_dashboard(metrics):
-    """Renders the metrics dashboard."""
+    """Renders the metrics dashboard with mini trendlines."""
     st.markdown("### 📊 核心宏观因子 (Macro Factors)")
-    c1, c2, c3, c4 = st.columns(4)
-    
-    with c1:
-        is_trig = metrics['rate_shock']
-        st.metric("利率冲击 (TNX ROC)", f"{metrics['tnx_roc']:+.1%}", 
-                  "⚠️ 触发" if is_trig else "✅ 安全", 
-                  delta_color="inverse" if is_trig else "normal")
-    with c2:
-        is_trig = metrics['recession']
-        val = metrics['sahm']
-        st.metric("衰退信号 (Sahm)", f"{val:.2f}", 
-                  "⚠️ 触发" if is_trig else "✅ 安全",
-                  delta_color="inverse" if is_trig else "normal")
-    with c3:
-        is_trig = metrics['corr_broken']
-        st.metric("股债相关性 (Corr)", f"{metrics['corr']:.2f}", 
-                  "⚠️ 失效" if is_trig else "✅ 正常",
-                  delta_color="inverse" if is_trig else "normal")
-    with c4:
-        is_trig = metrics['fear']
-        st.metric("恐慌指数 (VIX)", f"{metrics['vix']:.1f}", 
-                  "⚠️ 恐慌" if is_trig else "✅ 正常",
-                  delta_color="inverse" if is_trig else "normal")
+    hist = metrics.get('factor_trends')
+    if hist is None or (isinstance(hist, pd.DataFrame) and hist.empty):
+        hist = pd.DataFrame()
+
+    def get_series(col):
+        if isinstance(hist, pd.DataFrame) and col in hist.columns:
+            return hist[col].dropna()
+        return pd.Series(dtype=float)
+
+    def sparkline_fig(series, color="#2962FF"):
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=series.index, y=series, mode="lines", line=dict(color=color, width=2), hovertemplate="%{y:.2f}<extra></extra>"))
+        fig.update_layout(
+            height=140,
+            margin=dict(l=10, r=10, t=10, b=10),
+            template="plotly_white",
+            showlegend=False,
+            xaxis=dict(visible=False),
+            yaxis=dict(title=None, zeroline=False, showgrid=True, tickfont=dict(size=10)),
+        )
+        return fig
+
+    factor_items = [
+        {
+            "title": "利率冲击 (TNX ROC)",
+            "value": f"{metrics['tnx_roc']:+.1%}",
+            "status": "⚠️ 触发" if metrics['rate_shock'] else "✅ 安全",
+            "color": "#7c3aed",
+            "series": get_series("RateShock"),
+            "delta": metrics['tnx_roc'],
+        },
+        {
+            "title": "衰退信号 (Sahm)",
+            "value": f"{metrics['sahm']:.2f}",
+            "status": "⚠️ 触发" if metrics['recession'] else "✅ 安全",
+            "color": "#0ea5e9",
+            "series": get_series("Sahm"),
+            "delta": metrics['sahm'],
+        },
+        {
+            "title": "股债相关性 (Corr)",
+            "value": f"{metrics['corr']:.2f}",
+            "status": "⚠️ 失效" if metrics['corr_broken'] else "✅ 正常",
+            "color": "#fb923c",
+            "series": get_series("Corr"),
+            "delta": metrics['corr'],
+        },
+        {
+            "title": "恐慌指数 (VIX)",
+            "value": f"{metrics['vix']:.1f}",
+            "status": "⚠️ 恐慌" if metrics['fear'] else "✅ 正常",
+            "color": "#ef4444",
+            "series": get_series("VIX"),
+            "delta": metrics['vix'],
+        },
+    ]
+
+    for i in range(0, len(factor_items), 2):
+        cols = st.columns(2)
+        for j in range(2):
+            if i + j >= len(factor_items):
+                continue
+            item = factor_items[i + j]
+            with cols[j]:
+                st.metric(item["title"], item["value"], item["status"], delta_color="inverse" if "⚠️" in item["status"] else "normal")
+                if not item["series"].empty:
+                    st.plotly_chart(sparkline_fig(item["series"], item["color"]), use_container_width=True)
 
     st.markdown("#### 🎯 战术微调 (Tactical Modifiers)")
     c1, c2, c3 = st.columns(3)
@@ -1878,10 +2054,13 @@ def render_data_health_badges(metrics):
     freshness_days = metrics.get('freshness_days')
     latest_date = metrics.get('date')
     warnings = metrics.get('data_warnings', []) or []
+    fetch_ts = metrics.get('fetch_ts')
     badge = "🟢 数据最新"
     note = f"数据截至 {latest_date}" if latest_date else "数据时间未知"
     if freshness_days is not None:
         note += f" ｜ 滞后 {freshness_days} 天" if freshness_days > 0 else " ｜ 当日数据"
+    if fetch_ts:
+        note += f" ｜ 上次拉取: {fetch_ts}"
     if freshness_days is not None and freshness_days > 5:
         badge = "🔴 数据已过期"
     elif freshness_days is not None and freshness_days > 2:
@@ -1902,13 +2081,15 @@ def render_data_health_badges(metrics):
             for w in warnings:
                 st.markdown(f"- {w}")
 
-def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None):
-    """Renders the rebalancing table."""
+def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None, price_info=None):
+    """Renders the rebalancing table with live prices."""
     if asset_trends is None: asset_trends = {}
     targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime, asset_trends=asset_trends, vix=vix, yield_curve=yield_curve)
     
     # Add Current Holdings not in targets
     all_tickers = set(targets.keys()).union(current_holdings.keys())
+    if price_info is None:
+        price_info = get_live_prices(all_tickers)
     
     data = []
     if total_value == 0:
@@ -1921,6 +2102,10 @@ def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear,
         curr_pct = curr_val / total_value if total_value > 0 else 0
         
         diff_val = (tgt_pct - curr_pct) * total_value
+        price = price_info.get(tkr, {}).get("price") if price_info else None
+        chg = price_info.get(tkr, {}).get("change_pct") if price_info else None
+        price_text = f"${price:,.2f}" if price is not None else "-"
+        chg_text = f"{chg:+.2f}%" if chg is not None else "-"
         
         # Action Text
         action = "✅ 持有"
@@ -1936,6 +2121,8 @@ def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear,
             "名称": ASSET_NAMES.get(tkr, tkr),
             "目标仓位": tgt_pct * 100,
             "当前仓位": curr_pct * 100,
+            "最新价": price_text,
+            "日变动": chg_text,
             "当前市值": curr_val,
             "建议操作": action,
             "diff": diff_val # For sort
@@ -1953,10 +2140,48 @@ def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear,
                 "目标仓位": st.column_config.NumberColumn(format="%.1f%%"),
                 "当前仓位": st.column_config.NumberColumn(format="%.1f%%"),
                 "当前市值": st.column_config.NumberColumn(format="$%.0f"),
+                "日变动": st.column_config.TextColumn(help="相对前一交易日的涨跌幅"),
             },
             hide_index=True,
             use_container_width=True
         )
+
+
+def render_export_options(metrics, adjustments, targets):
+    state = metrics.get('state')
+    report_date = metrics.get('date')
+    lines = [
+        f"诊断时间: {metrics.get('fetch_ts', '')}",
+        f"数据截至: {report_date}",
+        f"当前状态: {state} ({MACRO_STATES.get(state, {}).get('display', '')})",
+        "",
+        "关键因子:",
+        f"- 利率冲击: {metrics.get('tnx_roc', 0):+.1%}",
+        f"- Sahm: {metrics.get('sahm', 0):.2f}",
+        f"- 股债相关性: {metrics.get('corr', 0):.2f}",
+        f"- VIX: {metrics.get('vix', 0):.1f}",
+        f"- 收益率曲线: {metrics.get('yield_curve', 0):.2f}%",
+        "",
+        "动态风控触发:",
+    ]
+    lines.extend([f"- {a}" for a in adjustments] or ["- 无"])
+    lines.append("")
+    lines.append("目标配置:")
+    for k, v in targets.items():
+        if v > 0:
+            lines.append(f"- {ASSET_NAMES.get(k, k)} ({k}): {v*100:.1f}%")
+    summary = "\n".join(lines)
+
+    st.markdown("#### 📤 导出诊断结果")
+    st.text_area("诊断摘要 (可复制)", summary, height=160)
+    st.download_button(
+        label="下载诊断摘要 (.txt)",
+        data=summary.encode('utf-8'),
+        file_name=f"diagnosis_{report_date or 'latest'}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
 
 def render_historical_backtest_section():
     """Renders the independent historical backtest section."""
@@ -2336,8 +2561,19 @@ def render_alert_config_ui():
                 except Exception:
                     time_obj = datetime.time(9, 30)
                 trigger_time = st.time_input("触发时间 (Local Time)", value=time_obj)
-                
+
+                st.markdown("**实时风控提醒**")
+                state_change_alert = st.checkbox("状态变化时立即提醒", value=bool(config.get("state_change_alert", False)))
+                vix_alert_enabled = st.checkbox("VIX 超阈值提醒", value=bool(config.get("vix_alert_enabled", False)))
+                vix_alert_threshold = st.number_input("VIX 阈值", value=float(config.get("vix_alert_threshold", 35)), step=1.0)
+
                 st.info("仅在应用运行时触发；默认新加坡时间 09:30，请根据本地/服务器时区自行调整。")
+
+            channels_cfg = config.get("channels", {}) or {}
+            with st.expander("📡 多渠道占位 (Telegram / 企业微信)", expanded=False):
+                telegram_bot_token = st.text_input("Telegram Bot Token", value=str(channels_cfg.get("telegram_bot_token", "")))
+                telegram_chat_id = st.text_input("Telegram Chat ID", value=str(channels_cfg.get("telegram_chat_id", "")))
+                wechat_webhook = st.text_input("企业微信 Webhook", value=str(channels_cfg.get("wechat_webhook", "")))
 
             if st.form_submit_button("💾 保存配置"):
                 email_ready_form = bool(email_to.strip() and email_from.strip() and email_pwd)
@@ -2353,7 +2589,15 @@ def render_alert_config_ui():
                         "smtp_port": smtp_port,
                         "frequency": frequency,
                         "trigger_time": trigger_time.strftime("%H:%M"),
-                        "last_run": config.get("last_run", "")
+                        "last_run": config.get("last_run", ""),
+                        "state_change_alert": state_change_alert,
+                        "vix_alert_enabled": vix_alert_enabled,
+                        "vix_alert_threshold": vix_alert_threshold,
+                        "channels": {
+                            "telegram_bot_token": telegram_bot_token,
+                            "telegram_chat_id": telegram_chat_id,
+                            "wechat_webhook": wechat_webhook,
+                        }
                     }
                     merged, issues, warns = validate_alert_config(new_config)
                     if issues:
@@ -2387,6 +2631,8 @@ def render_state_machine_check():
     st.header("🛡️ 宏观状态机与资产配置 (Macro State & Allocation)")
     st.caption("全自动资产配置生成器 (Auto-Allocator)")
     
+    use_cache = st.toggle("⚡ 5分钟缓存 (减少重复拉取)", value=True)
+    
     # 1. Alert Config
     render_alert_config_ui()
     
@@ -2401,8 +2647,8 @@ def render_state_machine_check():
         with st.status("正在进行宏观扫描...", expanded=True) as status:
             st.write("📡 获取数据并计算指标...")
             
-            # Use the new shared logic
-            success, metrics = analyze_market_state_logic()
+            # Use the shared logic with optional cache
+            success, metrics = analyze_market_state_logic_cached() if use_cache else analyze_market_state_logic()
             
             if not success:
                 status.update(label="诊断失败", state="error")
@@ -2410,11 +2656,46 @@ def render_state_machine_check():
             else:
                 st.write("✅ 数据获取与计算完成")
                 status.update(label="诊断完成", state="complete", expanded=False)
-                
+
+                # State history & alerts
+                history = record_state_history(metrics['state'], metrics)
+                change_info = get_state_change_info(history, metrics['state'], metrics.get('latest_date'))
+                cfg = load_alert_config()
+                if change_info:
+                    prev_state = change_info.get('prev_state')
+                    days_in_state = change_info.get('days_in_state')
+                    changed_on = change_info.get('changed_on')
+                    msg = f"当前状态已持续 {days_in_state} 天" if days_in_state else "状态持续时间未知"
+                    if prev_state:
+                        msg = f"上次状态：{prev_state} → 当前：{metrics['state']}，自 {changed_on} 起 {days_in_state} 天"
+                    st.info(msg)
+                if cfg.get("state_change_alert") and change_info and change_info.get('prev_state') and change_info.get('prev_state') != metrics['state']:
+                    st.warning("状态发生变化，已触发提醒 (占位)。")
+                if cfg.get("vix_alert_enabled") and metrics.get('vix') is not None and metrics['vix'] >= cfg.get('vix_alert_threshold', 35):
+                    st.error(f"VIX 达到 {metrics['vix']:.1f}，超过阈值 {cfg.get('vix_alert_threshold', 35)}。")
+
                 # Render Results
                 render_data_health_badges(metrics)
                 render_status_card(metrics['state'])
                 render_factor_dashboard(metrics)
+
+                adjustments = get_adjustment_reasons(
+                    metrics['state'],
+                    gold_bear=metrics['gold_bear'],
+                    value_regime=metrics['value_regime'],
+                    asset_trends=metrics.get('asset_trends', {}),
+                    vix=metrics.get('vix'),
+                    yield_curve=metrics.get('yield_curve')
+                )
+                targets = get_target_percentages(
+                    metrics['state'],
+                    gold_bear=metrics['gold_bear'],
+                    value_regime=metrics['value_regime'],
+                    asset_trends=metrics.get('asset_trends', {}),
+                    vix=metrics.get('vix'),
+                    yield_curve=metrics.get('yield_curve')
+                )
+                price_info = get_live_prices(set(targets.keys()).union(current_holdings.keys()))
                 
                 st.markdown("---")
                 render_rebalancing_table(
@@ -2425,8 +2706,15 @@ def render_state_machine_check():
                     metrics['value_regime'], 
                     metrics.get('asset_trends', {}),
                     vix=metrics.get('vix'),
-                    yield_curve=metrics.get('yield_curve')
+                    yield_curve=metrics.get('yield_curve'),
+                    price_info=price_info,
                 )
+
+                render_export_options(metrics, adjustments, targets)
+                if history:
+                    hist_df = pd.DataFrame(history).tail(10)
+                    with st.expander("📜 最近状态变更记录", expanded=False):
+                        st.dataframe(hist_df, use_container_width=True, hide_index=True)
                 
     render_historical_backtest_section()
 
