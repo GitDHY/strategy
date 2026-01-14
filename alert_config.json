@@ -7,7 +7,7 @@
     "smtp_port": 587,
     "frequency": "Daily",
     "trigger_time": "09:30",
-    "last_run": "2026-01-12",
+    "last_run": "2026-01-14",
     "state_change_alert": false,
     "vix_alert_enabled": false,
     "vix_alert_threshold": 35.0,
