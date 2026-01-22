@@ -22,10 +22,90 @@ st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer v1.4")
 
 # --- Helper Functions for Indicators ---
 
+# === 原有阈值 ===
 VIX_BOOST_LO = 13.0
 VIX_CUT_HI = 20.0
 VIX_PANIC = 25.0
 YIELD_CURVE_CUTOFF = -0.30
+
+# === 优化参数 ===
+# 1. 波动率目标机制
+TARGET_VOL = 0.12  # 年化12%目标波动率
+VOL_LOOKBACK = 20  # 计算实现波动率的回看天数
+VOL_SCALAR_MAX = 1.5  # 最大波动率缩放因子(允许加杠杆上限)
+VOL_SCALAR_MIN = 0.3  # 最小波动率缩放因子(最大减仓幅度)
+
+# 2. 动态止损机制
+DRAWDOWN_STOP_LOSS = -0.10  # 回撤止损线: -10%
+DRAWDOWN_REDUCE_RATIO = 0.5  # 触发止损时减仓比例
+DRAWDOWN_RECOVERY_THRESHOLD = -0.05  # 回撤恢复到-5%才解除止损
+
+# 3. VIX响应平滑化参数
+VIX_SMOOTH_START = 15.0  # VIX平滑响应起始点
+VIX_SMOOTH_END = 30.0  # VIX平滑响应终止点
+VIX_MAX_REDUCTION = 0.40  # 最大减仓幅度40%
+
+# 4. 信号确认延迟
+SIGNAL_CONFIRM_DAYS = 2  # 状态切换需要连续确认的天数
+
+# 5. 再平衡容忍带
+REBALANCE_THRESHOLD = 0.05  # 权重偏离超过5%才再平衡
+
+# 6. 状态转换平滑
+STATE_TRANSITION_DAYS = 3  # 状态切换过渡天数
+
+# === 新增优化参数（低过拟合风险）===
+# 7. 动量强度分层配置
+MOMENTUM_STRONG_THRESHOLD = 1.05  # 强势区: Price > MA * 1.05
+MOMENTUM_WEAK_THRESHOLD = 0.95    # 弱势区: Price < MA * 0.95
+MOMENTUM_NEUTRAL_REDUCTION = 0.15 # 中性区减仓比例
+
+# 8. Sahm Rule 预警增强
+SAHM_EARLY_WARNING_LO = 0.30  # 早期预警起点
+SAHM_EARLY_WARNING_HI = 0.50  # 衰退确认点
+SAHM_REDUCTION_RATE = 0.50    # 预警区间最大减仓比例 (0.30-0.50区间线性)
+
+# 9. 收益率曲线解倒挂延保护
+YC_UNINVERT_PROTECTION_MONTHS = 12  # 解倒挂后保护期（月）
+YC_UNINVERT_REDUCTION = 0.20        # 保护期内IWY减仓比例
+
+# 10. VIX均值回归加仓
+VIX_MEAN_REVERSION_PEAK = 25.0      # VIX峰值阈值
+VIX_MEAN_REVERSION_RATIO = 0.80     # 回落比例阈值 (当前 < 峰值*0.8)
+VIX_MEAN_REVERSION_BOOST = 0.10     # 加仓幅度
+
+# 11. 相关性动态再配置
+CORR_HIGH_THRESHOLD = 0.30          # 高相关性阈值
+CORR_REALLOC_RATIO = 0.10           # 从MBH转移到WTMF的比例
+
+# === 资产类别映射 (用于风险暴露分析和邮件生成) ===
+ASSET_CATEGORIES = {
+    'IWY': {'category': '权益', 'sub': '美股成长', 'risk_level': 'high'},
+    'LVHI': {'category': '权益', 'sub': '美股红利', 'risk_level': 'medium'},
+    'G3B.SI': {'category': '权益', 'sub': '新加坡蓝筹', 'risk_level': 'medium'},
+    'SRT.SI': {'category': '另类', 'sub': 'REITs', 'risk_level': 'medium'},
+    'AJBU.SI': {'category': '另类', 'sub': 'REITs', 'risk_level': 'medium'},
+    'MBH.SI': {'category': '固收', 'sub': '新元债券', 'risk_level': 'low'},
+    'GSD.SI': {'category': '商品', 'sub': '黄金', 'risk_level': 'medium'},
+    'WTMF': {'category': '对冲', 'sub': '危机Alpha', 'risk_level': 'low'},
+    'OTHERS': {'category': '其他', 'sub': '其他资产', 'risk_level': 'unknown'},
+}
+
+# === 资产名称映射 (用于邮件和UI显示) ===
+ASSET_NAMES = {
+    'IWY': '美股成长 (Russell Top 200 Growth)',
+    'WTMF': '危机Alpha (Managed Futures)',
+    'LVHI': '美股红利 (High Div Low Vol)',
+    'G3B.SI': '新加坡蓝筹 (STI ETF)',
+    'MBH.SI': '新元债券 (Govt Bond)',
+    'GSD.SI': '黄金 (Gold)',
+    'SRT.SI': 'S-REITs (Supermarket)',
+    'AJBU.SI': 'Keppel DC REIT',
+    'TLT': '美债 (20Y Treasury)',
+    'SPY': '标普500 (S&P 500)',
+    'OTHERS': '其他/待清理资产 (Others)'
+}
+
 SCHEDULER_LOCK = os.path.join(os.path.dirname(__file__), "data", "scheduler.lock")
 STATE_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "data", "state_history.json")
 os.makedirs(os.path.dirname(SCHEDULER_LOCK), exist_ok=True)
@@ -55,7 +135,7 @@ def ensure_fred_cached(series_ids=("UNRATE", "T10Y2Y")):
         except Exception as e:
             log_event("WARN", "fred_prefetch_failed", {"series": sid, "err": str(e)})
 
-def evaluate_risk_triggers(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+def evaluate_risk_triggers(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None, sahm=None, corr=None, yc_recently_inverted=False):
     if asset_trends is None:
         asset_trends = {}
     reasons = []
@@ -85,6 +165,19 @@ def evaluate_risk_triggers(s, gold_bear=False, value_regime=False, asset_trends=
         if asset_trends.get('IWY', False):
             cut = "80%" if (vix and vix > VIX_PANIC) else "50%"
             reasons.append(f"🛡️ 核心熔断: IWY 破位 -> 削减 {cut} 仓位")
+    
+    # 4. Sahm Rule 预警 (新增)
+    if sahm is not None and SAHM_EARLY_WARNING_LO <= sahm < SAHM_EARLY_WARNING_HI:
+        reduction_pct = int((sahm - SAHM_EARLY_WARNING_LO) / (SAHM_EARLY_WARNING_HI - SAHM_EARLY_WARNING_LO) * SAHM_REDUCTION_RATE * 100)
+        reasons.append(f"📉 Sahm预警 ({sahm:.2f}): 衰退风险上升 -> IWY预防性减仓 {reduction_pct}%")
+    
+    # 5. 收益率曲线解倒挂保护 (新增)
+    if yc_recently_inverted and yield_curve is not None and yield_curve > 0:
+        reasons.append(f"📈 解倒挂保护: 曲线转正但近期曾倒挂 -> 维持防御配置 {int(YC_UNINVERT_REDUCTION*100)}%")
+    
+    # 6. 相关性调整 (新增)
+    if corr is not None and corr > CORR_HIGH_THRESHOLD:
+        reasons.append(f"🔗 相关性失效 (Corr={corr:.2f}): 股债同涨同跌 -> MBH转WTMF {int(CORR_REALLOC_RATIO*100)}%")
 
     # 4. Gold
     if gold_bear:
@@ -92,7 +185,7 @@ def evaluate_risk_triggers(s, gold_bear=False, value_regime=False, asset_trends=
 
     return reasons
 
-def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None, sahm=None, corr=None, yc_recently_inverted=False):
     """
     Returns a list of strings explaining why the allocation differs from the base static model.
     """
@@ -103,6 +196,9 @@ def get_adjustment_reasons(s, gold_bear=False, value_regime=False, asset_trends=
         asset_trends=asset_trends,
         vix=vix,
         yield_curve=yield_curve,
+        sahm=sahm,
+        corr=corr,
+        yc_recently_inverted=yc_recently_inverted,
     )
 
 # Removed cache for debugging connection issues
@@ -645,6 +741,137 @@ def analyze_market_state_logic_cached():
     return analyze_market_state_logic()
 
 
+def generate_email_risk_exposure(targets):
+    """
+    生成邮件用的风险暴露分析HTML
+    """
+    # 计算目标类别权重
+    target_categories = {}
+    for tkr, w in targets.items():
+        cat = ASSET_CATEGORIES.get(tkr, {}).get('category', '其他')
+        target_categories[cat] = target_categories.get(cat, 0) + w
+    
+    cat_colors = {
+        '权益': '#f5222d', '固收': '#1890ff', '商品': '#faad14', 
+        '对冲': '#52c41a', '另类': '#722ed1', '其他': '#999'
+    }
+    
+    bars_html = ""
+    for cat in ['权益', '固收', '商品', '对冲', '另类']:
+        w = target_categories.get(cat, 0)
+        if w > 0:
+            bar_color = cat_colors.get(cat, '#999')
+            bars_html += f"""
+            <div style="margin-bottom:8px;">
+                <span style="display:inline-block;width:70px;font-size:13px;color:#666;">{cat}</span>
+                <span style="display:inline-block;width:150px;background:#e8e8e8;height:18px;border-radius:4px;vertical-align:middle;">
+                    <span style="display:block;width:{w*100}%;height:100%;background:{bar_color};border-radius:4px;"></span>
+                </span>
+                <span style="font-size:13px;margin-left:10px;font-weight:600;">{w*100:.1f}%</span>
+            </div>
+            """
+    
+    return bars_html
+
+
+def generate_email_execution_tips(metrics, state):
+    """
+    生成邮件用的执行建议HTML
+    """
+    tips = []
+    vix = metrics.get('vix')
+    sahm = metrics.get('sahm')
+    yc_val = metrics.get('yield_curve', 0)
+    
+    # 1. VIX相关提示
+    if vix is not None:
+        if vix > VIX_SMOOTH_END:
+            reduction_pct = int(VIX_MAX_REDUCTION * 100)
+            tips.append({
+                'icon': '📊',
+                'title': '高波动率警告',
+                'content': f'VIX={vix:.1f} 处于高位，建议按目标配置的 {100-reduction_pct}% 执行，剩余资金持有现金或 WTMF。',
+                'color': '#cf1322',
+                'bg': '#fff2f0'
+            })
+        elif vix > VIX_SMOOTH_START:
+            reduction = (vix - VIX_SMOOTH_START) / (VIX_SMOOTH_END - VIX_SMOOTH_START) * VIX_MAX_REDUCTION
+            exec_pct = int((1 - reduction) * 100)
+            tips.append({
+                'icon': '📊',
+                'title': '波动率偏高',
+                'content': f'VIX={vix:.1f}，可考虑按目标配置的 {exec_pct}% 执行，留 {100-exec_pct}% 现金缓冲。',
+                'color': '#ad6800',
+                'bg': '#fffbe6'
+            })
+    
+    # 2. Sahm Rule预警
+    if sahm is not None and SAHM_EARLY_WARNING_LO <= sahm < SAHM_EARLY_WARNING_HI:
+        tips.append({
+            'icon': '📉',
+            'title': 'Sahm预警区间',
+            'content': f'Sahm Rule={sahm:.2f} 处于预警区间，建议分批减仓权益资产，增加防御配置。',
+            'color': '#ad6800',
+            'bg': '#fffbe6'
+        })
+    
+    # 3. 收益率曲线提示
+    if yc_val < 0:
+        tips.append({
+            'icon': '📈',
+            'title': '收益率曲线倒挂',
+            'content': f'10Y-2Y={yc_val:.2f}%，曲线倒挂中，债券配置需谨慎，优先选择短久期或WTMF。',
+            'color': '#ad6800',
+            'bg': '#fffbe6'
+        })
+    elif metrics.get('yc_un_invert', False):
+        tips.append({
+            'icon': '⚠️',
+            'title': '解倒挂保护期',
+            'content': '收益率曲线刚转正，历史上此阶段衰退风险仍高，建议维持防御配置12个月。',
+            'color': '#ad6800',
+            'bg': '#fffbe6'
+        })
+    
+    # 4. 极端状态提示
+    if state == "EXTREME_ACCUMULATION":
+        tips.append({
+            'icon': '⚡',
+            'title': '抄底状态注意',
+            'content': '当前为极端抄底状态，建议分批建仓：首次40% → 反弹确认后60% → 趋势确立后75%。',
+            'color': '#ad6800',
+            'bg': '#fffbe6'
+        })
+    elif state in ["DEFLATION_RECESSION", "INFLATION_SHOCK"]:
+        tips.append({
+            'icon': '🛡️',
+            'title': '防御模式提醒',
+            'content': '当前处于危机状态，建议严格执行目标配置，优先保护本金，避免抄底冲动。',
+            'color': '#cf1322',
+            'bg': '#fff2f0'
+        })
+    
+    # 5. 通用执行建议
+    tips.append({
+        'icon': '📏',
+        'title': '再平衡建议',
+        'content': f'单一资产偏离 >{int(REBALANCE_THRESHOLD*100)}% 时再调仓，可节省交易成本；大幅调仓建议分 {STATE_TRANSITION_DAYS} 天执行。',
+        'color': '#0050b3',
+        'bg': '#e6f7ff'
+    })
+    
+    tips_html = ""
+    for tip in tips:
+        tips_html += f"""
+        <div style="background:{tip['bg']};border-radius:8px;padding:10px 14px;margin-bottom:8px;">
+            <div style="font-weight:600;color:{tip['color']};margin-bottom:2px;">{tip['icon']} {tip['title']}</div>
+            <div style="color:#333;font-size:13px;line-height:1.4;">{tip['content']}</div>
+        </div>
+        """
+    
+    return tips_html
+
+
 def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date):
     target_rows = ""
     for t, w in targets.items():
@@ -667,6 +894,7 @@ def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_dat
         """
 
     yc_val = metrics.get('yield_curve', 0)
+    state = metrics.get('state', 'NEUTRAL')
     summary_points = [
         f"数据截至 {report_date}",
         f"状态: {s_conf['display']}",
@@ -675,6 +903,12 @@ def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_dat
         f"Sahm {metrics['sahm']:.2f} ({'⚠️ 衰退信号' if metrics['recession'] else '✅ 未触发'})"
     ]
     summary_html = "".join([f"<span style='display:inline-block;background:#f0f4ff;color:#1a73e8;padding:6px 10px;border-radius:20px;margin:4px 4px 0 0;font-size:13px;'>{p}</span>" for p in summary_points])
+    
+    # 生成风险暴露分析
+    risk_exposure_html = generate_email_risk_exposure(targets)
+    
+    # 生成执行建议
+    execution_tips_html = generate_email_execution_tips(metrics, state)
 
     return f"""
     <html>
@@ -716,6 +950,14 @@ def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_dat
                     </tr>
                     {target_rows}
                 </table>
+                
+                <h3 style=\"margin:20px 0 10px 0; font-size:16px;\">🎯 风险暴露分析 (Risk Exposure)</h3>
+                <div style=\"background:#f9fafb;border-radius:10px;padding:14px 16px;margin:8px 0;\">
+                    {risk_exposure_html}
+                </div>
+                
+                <h3 style=\"margin:20px 0 10px 0; font-size:16px;\">💡 执行建议 (Execution Tips)</h3>
+                {execution_tips_html}
 
                 <p style=\"font-size: 12px; color: #6b7280; margin-top: 26px; text-align: center; border-top: 1px solid #e5e7eb; padding-top: 10px;\">
                     此邮件由 Stock Strategy Analyzer 自动生成，供参考，不构成投资建议。
@@ -753,7 +995,10 @@ def send_strategy_email(metrics, config):
         value_regime=metrics['value_regime'],
         asset_trends=metrics.get('asset_trends', {}),
         vix=metrics.get('vix'),
-        yield_curve=metrics.get('yield_curve')
+        yield_curve=metrics.get('yield_curve'),
+        sahm=metrics.get('sahm'),
+        corr=metrics.get('corr'),
+        yc_recently_inverted=metrics.get('yc_un_invert', False)
     )
 
     adjustments = get_adjustment_reasons(
@@ -762,7 +1007,10 @@ def send_strategy_email(metrics, config):
         value_regime=metrics['value_regime'],
         asset_trends=metrics.get('asset_trends', {}),
         vix=metrics.get('vix'),
-        yield_curve=metrics.get('yield_curve')
+        yield_curve=metrics.get('yield_curve'),
+        sahm=metrics.get('sahm'),
+        corr=metrics.get('corr'),
+        yc_recently_inverted=metrics.get('yc_un_invert', False)
     )
 
     html_content = render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date)
@@ -999,23 +1247,661 @@ def apply_gold_filter(targets, gold_bear):
         targets['WTMF'] = targets.get('WTMF', 0) + cut_amount
 
 
-def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None):
+def apply_momentum_intensity(targets, state, momentum_scores):
+    """
+    优化1: 动量强度分层配置
+    根据价格距离MA的幅度分层调整权重，而非简单的二元判断
+    momentum_scores: dict {ticker: score} where score = (price - ma) / ma
+    """
+    if state == "EXTREME_ACCUMULATION" or not momentum_scores:
+        return
+    
+    # IWY动量强度调整
+    iwy_score = momentum_scores.get('IWY')
+    if iwy_score is not None and targets.get('IWY', 0) > 0:
+        if iwy_score < (MOMENTUM_WEAK_THRESHOLD - 1):
+            # 弱势区：已由趋势熔断处理，这里不重复
+            pass
+        elif iwy_score < (MOMENTUM_STRONG_THRESHOLD - 1):
+            # 中性区 (-5% ~ +5%)：减仓一部分
+            reduction = targets['IWY'] * MOMENTUM_NEUTRAL_REDUCTION
+            targets['IWY'] -= reduction
+            targets['WTMF'] = targets.get('WTMF', 0) + reduction
+
+
+def apply_sahm_early_warning(targets, state, sahm):
+    """
+    优化2: Sahm Rule 预警增强
+    在Sahm 0.30-0.50区间提前减仓，而非等到0.50才触发
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or sahm is None:
+        return
+    
+    if SAHM_EARLY_WARNING_LO <= sahm < SAHM_EARLY_WARNING_HI:
+        # 线性减仓: 0.30时减0%, 0.50时减50%
+        reduction_pct = (sahm - SAHM_EARLY_WARNING_LO) / (SAHM_EARLY_WARNING_HI - SAHM_EARLY_WARNING_LO) * SAHM_REDUCTION_RATE
+        iwy_current = targets.get('IWY', 0)
+        if iwy_current > 0:
+            move_amt = iwy_current * reduction_pct
+            targets['IWY'] = iwy_current - move_amt
+            targets['WTMF'] = targets.get('WTMF', 0) + move_amt
+
+
+def apply_yield_curve_uninvert_protection(targets, state, yield_curve, yc_recently_inverted):
+    """
+    优化3: 收益率曲线解倒挂后延保护
+    收益率曲线从负转正后12个月内保持防御配置
+    yc_recently_inverted: bool, 过去12个月内是否曾深度倒挂
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"]:
+        return
+    
+    # 当前曲线已转正但近期曾倒挂 -> 保护期
+    if yield_curve is not None and yield_curve > 0 and yc_recently_inverted:
+        iwy_current = targets.get('IWY', 0)
+        if iwy_current > 0:
+            move_amt = iwy_current * YC_UNINVERT_REDUCTION
+            targets['IWY'] = iwy_current - move_amt
+            targets['MBH.SI'] = targets.get('MBH.SI', 0) + move_amt * 0.5
+            targets['WTMF'] = targets.get('WTMF', 0) + move_amt * 0.5
+
+
+def apply_vix_mean_reversion(targets, state, vix, vix_recent_peak):
+    """
+    优化4: VIX均值回归加仓
+    VIX从高位回落时触发温和加仓
+    vix_recent_peak: 近期VIX最高值
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or vix is None or vix_recent_peak is None:
+        return
+    
+    # 条件: 近期峰值>25，当前VIX已回落超过20%
+    if vix_recent_peak >= VIX_MEAN_REVERSION_PEAK and vix < vix_recent_peak * VIX_MEAN_REVERSION_RATIO:
+        # 从WTMF转移到IWY
+        wtmf_current = targets.get('WTMF', 0)
+        if wtmf_current > VIX_MEAN_REVERSION_BOOST:
+            targets['WTMF'] = wtmf_current - VIX_MEAN_REVERSION_BOOST
+            targets['IWY'] = targets.get('IWY', 0) + VIX_MEAN_REVERSION_BOOST
+
+
+def apply_correlation_adjustment(targets, state, corr):
+    """
+    优化5: 相关性动态再配置
+    股债相关性上升时增配非相关资产
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL", "CAUTIOUS_TREND"] or corr is None:
+        return
+    
+    if corr > CORR_HIGH_THRESHOLD:
+        # 股债相关性高，MBH对冲效果下降，转移到WTMF
+        mbh_current = targets.get('MBH.SI', 0)
+        if mbh_current > CORR_REALLOC_RATIO:
+            targets['MBH.SI'] = mbh_current - CORR_REALLOC_RATIO
+            targets['WTMF'] = targets.get('WTMF', 0) + CORR_REALLOC_RATIO
+
+
+def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None,
+                           sahm=None, corr=None, momentum_scores=None, yc_recently_inverted=False, vix_recent_peak=None):
     """
     Returns target asset allocation based on macro state.
     Shared by State Machine Diagnosis and Backtest.
-    asset_trends: dict {ticker: is_bearish_bool}
+    
+    新增参数:
+    - sahm: Sahm Rule值
+    - corr: 股债相关性
+    - momentum_scores: dict {ticker: (price-ma)/ma}
+    - yc_recently_inverted: 近12个月是否曾深度倒挂
+    - vix_recent_peak: 近期VIX峰值
     """
     asset_trends = asset_trends or {}
 
     targets = base_allocation(s, value_regime)
 
+    # 原有调整
     apply_vix_adjustments(targets, s, vix)
     apply_yield_curve_guard(targets, s, yield_curve)
     apply_trend_filters(targets, s, asset_trends)
     apply_iwy_safety_valve(targets, s, asset_trends, vix)
     apply_gold_filter(targets, gold_bear)
+    
+    # 新增优化调整（按影响程度排序，后执行的优先级更高）
+    apply_momentum_intensity(targets, s, momentum_scores)
+    apply_sahm_early_warning(targets, s, sahm)
+    apply_yield_curve_uninvert_protection(targets, s, yield_curve, yc_recently_inverted)
+    apply_correlation_adjustment(targets, s, corr)
+    apply_vix_mean_reversion(targets, s, vix, vix_recent_peak)
 
     return targets
+
+
+def generate_execution_tips(metrics, change_info, current_holdings=None, targets=None):
+    """
+    生成执行建议提示，帮助用户在实际操作时参考回测中的优化机制。
+    """
+    tips = []
+    
+    vix = metrics.get('vix')
+    state = metrics.get('state')
+    days_in_state = change_info.get('days_in_state') if change_info else None
+    prev_state = change_info.get('prev_state') if change_info else None
+    
+    # 1. 信号确认提示
+    if days_in_state is not None and days_in_state <= SIGNAL_CONFIRM_DAYS:
+        if prev_state and prev_state != state:
+            tips.append({
+                'type': 'warning',
+                'icon': '🔄',
+                'title': '状态确认中',
+                'content': f'状态刚从 {prev_state} 切换到 {state}，仅持续 {days_in_state} 天。建议观望 {SIGNAL_CONFIRM_DAYS - days_in_state + 1} 天确认后再大幅调仓。'
+            })
+    
+    # 2. 波动率提示
+    if vix is not None:
+        if vix > VIX_SMOOTH_END:
+            reduction_pct = int(VIX_MAX_REDUCTION * 100)
+            tips.append({
+                'type': 'error',
+                'icon': '📊',
+                'title': '高波动率警告',
+                'content': f'VIX={vix:.1f} 处于高位，建议按目标配置的 {100-reduction_pct}% 执行，剩余资金持有现金或 WTMF。'
+            })
+        elif vix > VIX_SMOOTH_START:
+            # 线性计算减仓比例
+            reduction = (vix - VIX_SMOOTH_START) / (VIX_SMOOTH_END - VIX_SMOOTH_START) * VIX_MAX_REDUCTION
+            exec_pct = int((1 - reduction) * 100)
+            tips.append({
+                'type': 'warning',
+                'icon': '📊',
+                'title': '波动率偏高',
+                'content': f'VIX={vix:.1f}，波动率偏高。可考虑按目标配置的 {exec_pct}% 执行，留 {100-exec_pct}% 现金缓冲。'
+            })
+    
+    # 3. 状态过渡执行建议
+    if targets and current_holdings:
+        total_change = 0
+        for ticker, target_w in targets.items():
+            current_w = current_holdings.get(ticker, 0)
+            if isinstance(current_w, (int, float)):
+                total_change += abs(target_w - current_w)
+        
+        if total_change > 0.20:  # 配置变化超过20%
+            tips.append({
+                'type': 'info',
+                'icon': '🔀',
+                'title': '建议分步过渡',
+                'content': f'目标配置变化较大（约 {total_change*100:.0f}%），建议分 {STATE_TRANSITION_DAYS} 天逐步调整，避免一次性大幅换仓。'
+            })
+    
+    # 4. 再平衡容忍带提示
+    if targets and current_holdings:
+        max_deviation = 0
+        for ticker, target_w in targets.items():
+            current_w = current_holdings.get(ticker, 0)
+            if isinstance(current_w, (int, float)):
+                deviation = abs(target_w - current_w)
+                max_deviation = max(max_deviation, deviation)
+        
+        if max_deviation < REBALANCE_THRESHOLD:
+            tips.append({
+                'type': 'success',
+                'icon': '📏',
+                'title': '无需调仓',
+                'content': f'当前持仓与目标偏离 < {REBALANCE_THRESHOLD*100:.0f}%，可暂不调仓以节省交易成本。'
+            })
+    
+    # 5. 极端抄底状态提示
+    if state == "EXTREME_ACCUMULATION":
+        tips.append({
+            'type': 'warning',
+            'icon': '⚡',
+            'title': '抄底状态注意',
+            'content': '当前为极端抄底状态，建议分批建仓：首次40% → 反弹确认后60% → 趋势确立后75%。'
+        })
+    
+    # 6. 止损提醒
+    tips.append({
+        'type': 'info',
+        'icon': '🛡️',
+        'title': '止损建议',
+        'content': f'如持仓回撤超过 {abs(DRAWDOWN_STOP_LOSS)*100:.0f}%，建议风险资产减仓 {DRAWDOWN_REDUCE_RATIO*100:.0f}%，回撤恢复到 {abs(DRAWDOWN_RECOVERY_THRESHOLD)*100:.0f}% 内再恢复。'
+    })
+    
+    # 7. Sahm Rule 预警提示
+    sahm = metrics.get('sahm')
+    if sahm is not None and SAHM_EARLY_WARNING_LO <= sahm < SAHM_EARLY_WARNING_HI:
+        reduction_pct = int((sahm - SAHM_EARLY_WARNING_LO) / (SAHM_EARLY_WARNING_HI - SAHM_EARLY_WARNING_LO) * SAHM_REDUCTION_RATE * 100)
+        tips.append({
+            'type': 'warning',
+            'icon': '📉',
+            'title': 'Sahm Rule 预警',
+            'content': f'Sahm={sahm:.2f} 处于预警区间 ({SAHM_EARLY_WARNING_LO}-{SAHM_EARLY_WARNING_HI})，建议IWY减仓约 {reduction_pct}%。'
+        })
+    
+    # 8. 收益率曲线解倒挂提示
+    yc_un_invert = metrics.get('yc_un_invert', False)
+    yield_curve = metrics.get('yield_curve')
+    if yc_un_invert and yield_curve is not None and yield_curve > 0:
+        tips.append({
+            'type': 'warning',
+            'icon': '📈',
+            'title': '解倒挂保护期',
+            'content': f'收益率曲线已转正({yield_curve:.2f}%)，但近期曾深度倒挂。历史上解倒挂后9-18个月易发生衰退，建议维持防御配置。'
+        })
+    
+    # 9. 相关性警告
+    corr = metrics.get('corr')
+    if corr is not None and corr > CORR_HIGH_THRESHOLD:
+        tips.append({
+            'type': 'info',
+            'icon': '🔗',
+            'title': '股债相关性偏高',
+            'content': f'当前股债相关性={corr:.2f} > {CORR_HIGH_THRESHOLD}，债券对冲效果减弱，已自动增配 WTMF。'
+        })
+    
+    return tips
+
+
+def calculate_portfolio_health(current_holdings, targets, total_value):
+    """
+    计算持仓健康度评分 (0-100分)
+    返回: (score, details_dict)
+    """
+    if total_value <= 0:
+        return 0, {'reason': '总市值为零'}
+    
+    # 1. 权重偏离度 (40分)
+    total_deviation = 0
+    max_single_deviation = 0
+    deviations = {}
+    
+    all_tickers = set(targets.keys()).union(current_holdings.keys())
+    for tkr in all_tickers:
+        target_w = targets.get(tkr, 0)
+        current_val = current_holdings.get(tkr, 0)
+        current_w = current_val / total_value if total_value > 0 else 0
+        dev = abs(target_w - current_w)
+        deviations[tkr] = {'target': target_w, 'current': current_w, 'deviation': dev}
+        total_deviation += dev
+        max_single_deviation = max(max_single_deviation, dev)
+    
+    # 偏离度评分: 总偏离<10%得满分，>50%得0分
+    deviation_score = max(0, 40 * (1 - total_deviation / 0.5))
+    
+    # 2. 单一资产集中度 (20分)
+    max_weight = max([v / total_value for v in current_holdings.values()]) if current_holdings else 0
+    # 单一资产<40%得满分，>70%得0分
+    concentration_score = max(0, 20 * (1 - (max_weight - 0.4) / 0.3)) if max_weight > 0.4 else 20
+    
+    # 3. 资产类别多样性 (20分)
+    category_weights = {}
+    for tkr, val in current_holdings.items():
+        if val <= 0:
+            continue
+        cat = ASSET_CATEGORIES.get(tkr, {}).get('category', '其他')
+        category_weights[cat] = category_weights.get(cat, 0) + val / total_value
+    
+    # 至少覆盖3个类别得满分
+    diversity_score = min(20, len([c for c, w in category_weights.items() if w > 0.05]) * 5)
+    
+    # 4. 现金/对冲覆盖 (20分) - 检查防御性配置
+    defensive_weight = category_weights.get('固收', 0) + category_weights.get('对冲', 0) + category_weights.get('商品', 0)
+    # 防御配置在15-40%之间得满分
+    if 0.15 <= defensive_weight <= 0.40:
+        defensive_score = 20
+    elif defensive_weight < 0.15:
+        defensive_score = max(0, 20 * defensive_weight / 0.15)
+    else:
+        defensive_score = max(0, 20 * (1 - (defensive_weight - 0.40) / 0.30))
+    
+    total_score = deviation_score + concentration_score + diversity_score + defensive_score
+    
+    return total_score, {
+        'deviation_score': deviation_score,
+        'concentration_score': concentration_score,
+        'diversity_score': diversity_score,
+        'defensive_score': defensive_score,
+        'total_deviation': total_deviation,
+        'max_single_deviation': max_single_deviation,
+        'max_weight': max_weight,
+        'category_weights': category_weights,
+        'deviations': deviations
+    }
+
+
+def generate_rebalance_priority(current_holdings, targets, total_value, metrics):
+    """
+    生成调仓优先级列表，按紧迫程度排序
+    返回: [(ticker, priority_score, reason, action_detail), ...]
+    """
+    priorities = []
+    
+    if total_value <= 0:
+        return priorities
+    
+    vix = metrics.get('vix', 15)
+    state = metrics.get('state', 'NEUTRAL')
+    
+    all_tickers = set(targets.keys()).union(current_holdings.keys())
+    
+    for tkr in all_tickers:
+        target_w = targets.get(tkr, 0)
+        current_val = current_holdings.get(tkr, 0)
+        current_w = current_val / total_value
+        diff_w = target_w - current_w
+        diff_val = diff_w * total_value
+        
+        if abs(diff_w) < 0.02:  # 偏离<2%忽略
+            continue
+        
+        # 基础优先级分数 (0-100)
+        priority = abs(diff_w) * 100  # 偏离越大越紧急
+        reason = []
+        
+        # 加权因子
+        cat_info = ASSET_CATEGORIES.get(tkr, {})
+        risk_level = cat_info.get('risk_level', 'medium')
+        
+        # 1. 风险资产在高波动期优先减仓
+        if diff_w < 0 and risk_level == 'high' and vix > 20:
+            priority *= 1.5
+            reason.append(f"高风险资产+VIX={vix:.0f}")
+        
+        # 2. 目标为0的资产优先清仓
+        if target_w == 0 and current_val > 0:
+            priority *= 1.3
+            reason.append("目标清仓")
+        
+        # 3. 防御状态下优先增配防御资产
+        if state in ['DEFLATION_RECESSION', 'CAUTIOUS_VOL', 'CAUTIOUS_TREND']:
+            if diff_w > 0 and cat_info.get('category') in ['固收', '对冲', '商品']:
+                priority *= 1.2
+                reason.append("防御态势增配")
+        
+        # 4. 极端抄底状态优先增配权益
+        if state == 'EXTREME_ACCUMULATION':
+            if diff_w > 0 and cat_info.get('category') == '权益':
+                priority *= 1.2
+                reason.append("抄底增配")
+        
+        action = "买入" if diff_w > 0 else "卖出"
+        action_detail = f"{action} ${abs(diff_val):,.0f} ({abs(diff_w)*100:.1f}%)"
+        
+        priorities.append({
+            'ticker': tkr,
+            'name': ASSET_NAMES.get(tkr, tkr),
+            'priority': priority,
+            'reasons': reason,
+            'action': action,
+            'action_detail': action_detail,
+            'diff_val': diff_val,
+            'diff_w': diff_w,
+            'current_w': current_w,
+            'target_w': target_w
+        })
+    
+    # 按优先级降序排序
+    priorities.sort(key=lambda x: x['priority'], reverse=True)
+    return priorities
+
+
+def estimate_rebalance_cost(priorities, cost_bps=10):
+    """
+    估算调仓成本
+    cost_bps: 交易成本 (基点, 默认10bps = 0.1%)
+    """
+    total_turnover = sum(abs(p['diff_val']) for p in priorities)
+    estimated_cost = total_turnover * cost_bps / 10000
+    return total_turnover, estimated_cost
+
+
+def generate_stepwise_plan(priorities, total_value, days=3):
+    """
+    生成分步调仓计划
+    """
+    if not priorities:
+        return []
+    
+    # 按天分配操作
+    plan = []
+    total_change = sum(abs(p['diff_val']) for p in priorities)
+    
+    if total_change / total_value < 0.10:
+        # 变化<10%，一次性调整
+        plan.append({
+            'day': 1,
+            'description': '一次性完成调仓',
+            'actions': [(p['ticker'], p['action_detail']) for p in priorities]
+        })
+    else:
+        # 分步执行
+        # 第1天: 卖出操作 + 紧急买入
+        day1_actions = []
+        day2_actions = []
+        day3_actions = []
+        
+        for p in priorities:
+            if p['diff_val'] < 0:  # 卖出优先
+                day1_actions.append((p['ticker'], p['action_detail']))
+            elif p['priority'] > 30:  # 高优先级买入
+                day2_actions.append((p['ticker'], p['action_detail']))
+            else:
+                day3_actions.append((p['ticker'], p['action_detail']))
+        
+        if day1_actions:
+            plan.append({'day': 1, 'description': '执行卖出操作，回收资金', 'actions': day1_actions})
+        if day2_actions:
+            plan.append({'day': 2, 'description': '高优先级买入', 'actions': day2_actions})
+        if day3_actions:
+            plan.append({'day': 3, 'description': '完成剩余调整', 'actions': day3_actions})
+    
+    return plan
+
+
+def render_portfolio_health_card(score, details, state):
+    """渲染持仓健康度卡片"""
+    st.markdown("### 📊 持仓健康度评估")
+    
+    # 健康度颜色
+    if score >= 80:
+        color, status = '#52c41a', '优秀'
+    elif score >= 60:
+        color, status = '#1890ff', '良好'
+    elif score >= 40:
+        color, status = '#faad14', '需调整'
+    else:
+        color, status = '#f5222d', '需重配'
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown(f"""
+        <div style="text-align:center;padding:20px;background:#f9fafb;border-radius:12px;">
+            <div style="font-size:48px;font-weight:700;color:{color};">{score:.0f}</div>
+            <div style="font-size:16px;color:#666;margin-top:4px;">{status}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        # 分项评分
+        items = [
+            ('权重偏离', details['deviation_score'], 40),
+            ('集中度', details['concentration_score'], 20),
+            ('多样性', details['diversity_score'], 20),
+            ('防御配置', details['defensive_score'], 20),
+        ]
+        for name, score_item, max_score in items:
+            pct = score_item / max_score * 100
+            bar_color = '#52c41a' if pct >= 70 else ('#faad14' if pct >= 40 else '#f5222d')
+            st.markdown(f"""
+            <div style="margin-bottom:8px;">
+                <div style="display:flex;justify-content:space-between;font-size:13px;">
+                    <span>{name}</span><span>{score_item:.0f}/{max_score}</span>
+                </div>
+                <div style="background:#e8e8e8;height:6px;border-radius:3px;overflow:hidden;">
+                    <div style="width:{pct}%;height:100%;background:{bar_color};"></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+def render_risk_exposure_chart(details, targets):
+    """渲染风险暴露分析"""
+    st.markdown("### 🎯 风险暴露分析")
+    
+    category_weights = details.get('category_weights', {})
+    
+    # 计算目标类别权重
+    target_categories = {}
+    for tkr, w in targets.items():
+        cat = ASSET_CATEGORIES.get(tkr, {}).get('category', '其他')
+        target_categories[cat] = target_categories.get(cat, 0) + w
+    
+    # 所有类别
+    all_cats = ['权益', '固收', '商品', '对冲', '另类', '其他']
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**当前配置**")
+        for cat in all_cats:
+            w = category_weights.get(cat, 0)
+            if w > 0 or target_categories.get(cat, 0) > 0:
+                bar_color = {'权益': '#f5222d', '固收': '#1890ff', '商品': '#faad14', '对冲': '#52c41a', '另类': '#722ed1'}.get(cat, '#999')
+                st.markdown(f"""
+                <div style="margin-bottom:6px;">
+                    <span style="display:inline-block;width:60px;font-size:13px;">{cat}</span>
+                    <span style="display:inline-block;width:120px;background:#e8e8e8;height:16px;border-radius:4px;vertical-align:middle;">
+                        <span style="display:block;width:{w*100}%;height:100%;background:{bar_color};border-radius:4px;"></span>
+                    </span>
+                    <span style="font-size:13px;margin-left:8px;">{w*100:.1f}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("**目标配置**")
+        for cat in all_cats:
+            w = target_categories.get(cat, 0)
+            if w > 0 or category_weights.get(cat, 0) > 0:
+                bar_color = {'权益': '#f5222d', '固收': '#1890ff', '商品': '#faad14', '对冲': '#52c41a', '另类': '#722ed1'}.get(cat, '#999')
+                st.markdown(f"""
+                <div style="margin-bottom:6px;">
+                    <span style="display:inline-block;width:60px;font-size:13px;">{cat}</span>
+                    <span style="display:inline-block;width:120px;background:#e8e8e8;height:16px;border-radius:4px;vertical-align:middle;">
+                        <span style="display:block;width:{w*100}%;height:100%;background:{bar_color};border-radius:4px;"></span>
+                    </span>
+                    <span style="font-size:13px;margin-left:8px;">{w*100:.1f}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+
+def render_rebalance_priority_table(priorities, turnover, cost):
+    """渲染调仓优先级表格"""
+    st.markdown("### 🔥 调仓优先级")
+    st.caption(f"预估换手: ${turnover:,.0f} | 交易成本: ~${cost:,.0f}")
+    
+    if not priorities:
+        st.info("当前持仓与目标配置偏离较小，无需调整")
+        return
+    
+    # 构建表格数据
+    data = []
+    for i, p in enumerate(priorities, 1):
+        urgency = '🔴 紧急' if p['priority'] > 30 else ('🟡 建议' if p['priority'] > 15 else '🟢 可选')
+        reasons = ', '.join(p['reasons']) if p['reasons'] else '-'
+        data.append({
+            '优先级': i,
+            '紧迫度': urgency,
+            '资产': f"{p['name']} ({p['ticker']})",
+            '操作': p['action_detail'],
+            '当前→目标': f"{p['current_w']*100:.1f}% → {p['target_w']*100:.1f}%",
+            '触发因素': reasons
+        })
+    
+    df = pd.DataFrame(data)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+
+def render_stepwise_plan(plan):
+    """渲染分步调仓计划"""
+    if not plan:
+        return
+    
+    st.markdown("### 📅 分步执行计划")
+    
+    for step in plan:
+        day = step['day']
+        desc = step['description']
+        actions = step['actions']
+        
+        with st.expander(f"**第{day}天**: {desc}", expanded=(day == 1)):
+            for tkr, action in actions:
+                st.markdown(f"- **{ASSET_NAMES.get(tkr, tkr)}** ({tkr}): {action}")
+
+
+def render_enhanced_diagnosis(metrics, current_holdings, total_value, targets, change_info):
+    """渲染增强版持仓诊断"""
+    st.markdown("---")
+    st.markdown("## 🔬 深度持仓诊断")
+    
+    # 1. 健康度评估
+    score, details = calculate_portfolio_health(current_holdings, targets, total_value)
+    render_portfolio_health_card(score, details, metrics.get('state'))
+    
+    st.markdown("---")
+    
+    # 2. 风险暴露分析
+    render_risk_exposure_chart(details, targets)
+    
+    st.markdown("---")
+    
+    # 3. 调仓优先级
+    priorities = generate_rebalance_priority(current_holdings, targets, total_value, metrics)
+    turnover, cost = estimate_rebalance_cost(priorities)
+    render_rebalance_priority_table(priorities, turnover, cost)
+    
+    # 4. 分步执行计划
+    plan = generate_stepwise_plan(priorities, total_value)
+    render_stepwise_plan(plan)
+
+
+def render_execution_tips(tips):
+    """渲染执行建议提示卡片"""
+    if not tips:
+        return
+    
+    st.markdown("### 💡 执行建议 (Execution Tips)")
+    st.caption("基于回测优化机制的实时操作参考")
+    
+    for tip in tips:
+        tip_type = tip.get('type', 'info')
+        icon = tip.get('icon', '💡')
+        title = tip.get('title', '')
+        content = tip.get('content', '')
+        
+        if tip_type == 'error':
+            bg_color = '#fff2f0'
+            border_color = '#ffccc7'
+            text_color = '#cf1322'
+        elif tip_type == 'warning':
+            bg_color = '#fffbe6'
+            border_color = '#ffe58f'
+            text_color = '#ad6800'
+        elif tip_type == 'success':
+            bg_color = '#f6ffed'
+            border_color = '#b7eb8f'
+            text_color = '#389e0d'
+        else:  # info
+            bg_color = '#e6f7ff'
+            border_color = '#91d5ff'
+            text_color = '#0050b3'
+        
+        st.markdown(f"""
+        <div style="background:{bg_color};border:1px solid {border_color};border-radius:8px;padding:12px 16px;margin-bottom:10px;">
+            <div style="font-weight:600;color:{text_color};margin-bottom:4px;">{icon} {title}</div>
+            <div style="color:#333;font-size:14px;line-height:1.5;">{content}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
 
 def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
     """
@@ -1194,6 +2080,24 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     prev_targets = {}
     prev_rets = None
     
+    # === 优化机制状态变量 ===
+    # 波动率目标机制
+    portfolio_returns_history = []  # 用于计算实现波动率
+    
+    # 动态止损机制
+    peak_nav = initial_capital  # 历史最高净值
+    in_stop_loss_mode = False  # 是否处于止损模式
+    
+    # 信号确认延迟机制
+    pending_state = None  # 待确认的新状态
+    pending_state_days = 0  # 待确认状态的连续天数
+    confirmed_state = None  # 已确认的状态
+    
+    # 状态转换平滑机制
+    transition_from_weights = None  # 过渡起始权重
+    transition_day = 0  # 当前过渡天数
+    is_in_transition = False  # 是否正在过渡
+    
     # We iterate daily. To speed up, we could vectorise, but logic is complex.
     # Logic: Daily return = Sum(Weight_i * Return_i)
     # Rebalancing frequency controls when we update target weights.
@@ -1241,38 +2145,60 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         return target_ticker
 
     prev_date = None
-    current_weights = {}  # Actual portfolio weights (may drift between rebalances)
     
     for date, row in df_states.iterrows():
-        # Get Targets for today (based on today's state)
-        # Note: In reality, we trade tomorrow based on today's close state?
-        # Or trade today at close? Assuming trade at close.
-        s = row['State']
+        # Get raw state from data
+        raw_state = row['State']
         gb = row['Gold_Bear']
         vr = row['Value_Regime']
+        
+        # === 优化1: 信号确认延迟机制 ===
+        # 状态切换需连续 SIGNAL_CONFIRM_DAYS 天确认才生效
+        if confirmed_state is None:
+            # 首日直接确认
+            confirmed_state = raw_state
+            pending_state = None
+            pending_state_days = 0
+        elif raw_state != confirmed_state:
+            # 检测到状态变化
+            if pending_state == raw_state:
+                # 继续确认同一个待切换状态
+                pending_state_days += 1
+                if pending_state_days >= SIGNAL_CONFIRM_DAYS:
+                    # 确认切换！启动过渡
+                    confirmed_state = raw_state
+                    pending_state = None
+                    pending_state_days = 0
+                    # 标记开始状态过渡
+                    is_in_transition = True
+                    transition_day = 0
+                    transition_from_weights = prev_targets.copy() if prev_targets else None
+            else:
+                # 新的待切换状态
+                pending_state = raw_state
+                pending_state_days = 1
+        else:
+            # 状态回归到已确认状态，取消待确认
+            pending_state = None
+            pending_state_days = 0
+        
+        # 使用确认后的状态
+        s = confirmed_state
         
         # Check if this is a rebalancing day
         should_rebalance = is_rebalance_day(date, rebal_freq, prev_date)
         
         # Get trends for this date
         daily_trends = {}
-        # We need to map the trends check to proxies too? 
-        # The strategy logic checks specific tickers. We should probably simulate trends on the Proxy.
-        # But get_target_percentages expects original tickers. 
-        # We will let get_target_percentages run as is, but we feed it "Proxy Trends" masquerading as Asset Trends.
         
         if use_proxies:
-            # Map proxy trends back to original tickers for the logic to consume
-            # E.g. If ^GSPC is Bearish, then IWY is Bearish
             proxy_trend_bear = False
             if '^GSPC' in trend_bear_all.columns:
                 proxy_trend_bear = trend_bear_all.loc[date]['^GSPC']
             
-            # Apply to all equity
             for t in ['IWY', 'G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI']:
                 daily_trends[t] = proxy_trend_bear
                 
-            # Gold
             gold_proxy = 'GLD'
             if date < pd.Timestamp('2004-11-18') and 'GC=F' in trend_bear_all.columns:
                  gold_proxy = 'GC=F'
@@ -1280,7 +2206,6 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             if gold_proxy in trend_bear_all.columns:
                 daily_trends['GSD.SI'] = trend_bear_all.loc[date][gold_proxy]
 
-            # Bond Proxy Trend (MBH.SI -> VUSTX/TLT)
             bond_proxy = 'TLT'
             if 'VUSTX' in trend_bear_all.columns:
                 bond_proxy = 'VUSTX'
@@ -1293,28 +2218,68 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         
         vix_val = row.get('VIX')
         yc_val = row.get('YieldCurve')
+        sahm_val = row.get('Sahm')
+        corr_val = row.get('Corr')
         
-        # Calculate target weights (only used on rebalance days)
-        targets = get_target_percentages(s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends, vix=vix_val, yield_curve=yc_val)
+        # 计算动量强度分数 (price - ma) / ma
+        momentum_scores = {}
+        if date in price_data.index and date in ma_all.index:
+            for ticker in price_data.columns:
+                try:
+                    p = price_data.loc[date, ticker]
+                    m = ma_all.loc[date, ticker]
+                    if pd.notna(p) and pd.notna(m) and m > 0:
+                        momentum_scores[ticker] = (p - m) / m
+                except:
+                    pass
+            # 映射代理资产的动量到原始资产
+            if use_proxies and '^GSPC' in momentum_scores:
+                momentum_scores['IWY'] = momentum_scores['^GSPC']
+        
+        # 检查近期VIX峰值（用于均值回归加仓）
+        vix_recent_peak = None
+        if 'VIX' in df_states.columns:
+            lookback_start = max(0, df_states.index.get_loc(date) - 60)
+            vix_history = df_states['VIX'].iloc[lookback_start:df_states.index.get_loc(date)+1]
+            if len(vix_history) > 0:
+                vix_recent_peak = vix_history.max()
+        
+        # 检查近12个月是否曾深度倒挂
+        yc_recently_inverted = False
+        if 'YieldCurve' in df_states.columns:
+            lookback_start = max(0, df_states.index.get_loc(date) - 252)
+            yc_history = df_states['YieldCurve'].iloc[lookback_start:df_states.index.get_loc(date)+1]
+            if len(yc_history) > 0:
+                yc_recently_inverted = (yc_history.min() < -0.20)
+        
+        # Calculate base target weights (with new optimization parameters)
+        targets = get_target_percentages(
+            s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends, 
+            vix=vix_val, yield_curve=yc_val,
+            sahm=sahm_val, corr=corr_val, momentum_scores=momentum_scores,
+            yc_recently_inverted=yc_recently_inverted, vix_recent_peak=vix_recent_peak
+        )
+        
+        # === 优化4: VIX响应平滑化 ===
+        # 替代原有的阶梯式VIX调整，使用连续函数
+        if s == "NEUTRAL" and vix_val is not None and vix_val > VIX_SMOOTH_START:
+            # 线性平滑响应: VIX从15到30线性减仓0到40%
+            smooth_reduction = min((vix_val - VIX_SMOOTH_START) / (VIX_SMOOTH_END - VIX_SMOOTH_START) * VIX_MAX_REDUCTION, VIX_MAX_REDUCTION)
+            iwy_current = targets.get('IWY', 0)
+            move_amt = iwy_current * smooth_reduction
+            targets['IWY'] = iwy_current - move_amt
+            targets['WTMF'] = targets.get('WTMF', 0) + move_amt
         
         # --- Map Targets to Available Assets (Proxy Translation) ---
         new_target_weights = {}
         for t, w in targets.items():
             mapped_asset = map_target_to_asset(t, date)
-            if mapped_asset == 'CASH':
-                # Cash means 0 return, we just don't invest it
-                pass 
-            elif mapped_asset in price_data.columns:
+            if mapped_asset != 'CASH' and mapped_asset in price_data.columns:
                 new_target_weights[mapped_asset] = new_target_weights.get(mapped_asset, 0.0) + w
-            else:
-                # If mapped asset missing (e.g. TLT before 2002), hold Cash
-                pass
         
         # --- Calculate Drifted Weights from previous day ---
         drifted_weights = {}
         if prev_targets:
-            # Calculate "Drifted Weights" from previous day
-            # Formula: W_drifted_i = W_prev_i * (1 + r_i) / (1 + R_port)
             drifted_values = {}
             total_drifted_val = 0.0
             
@@ -1326,33 +2291,106 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
                 drifted_values[t] = val
                 total_drifted_val += val
                 
-            # Cash (implied)
             prev_cash_w = max(0.0, 1.0 - sum(prev_targets.values()))
-            drifted_cash_val = prev_cash_w * 1.0 # Cash return 0
+            drifted_cash_val = prev_cash_w * 1.0
             total_drifted_val += drifted_cash_val
             
-            # Normalize to get Drifted Weights
             if total_drifted_val > 0:
                 drifted_weights = {t: v / total_drifted_val for t, v in drifted_values.items()}
             else:
                 drifted_weights = prev_targets.copy()
         
+        # === 优化6: 状态转换平滑过渡 ===
+        # 新旧权重按过渡天数加权混合
+        if is_in_transition and transition_from_weights:
+            transition_day += 1
+            transition_progress = min(transition_day / STATE_TRANSITION_DAYS, 1.0)
+            
+            # 混合权重
+            blended_weights = {}
+            all_assets = set(new_target_weights.keys()) | set(transition_from_weights.keys())
+            for asset in all_assets:
+                old_w = transition_from_weights.get(asset, 0.0)
+                new_w = new_target_weights.get(asset, 0.0)
+                blended_weights[asset] = old_w * (1 - transition_progress) + new_w * transition_progress
+            
+            new_target_weights = blended_weights
+            
+            if transition_day >= STATE_TRANSITION_DAYS:
+                is_in_transition = False
+                transition_from_weights = None
+                transition_day = 0
+        
+        # === 优化5: 再平衡容忍带 ===
+        # 只有当权重偏离超过阈值时才再平衡
+        needs_rebalance_by_threshold = False
+        if drifted_weights and new_target_weights:
+            all_assets = set(new_target_weights.keys()) | set(drifted_weights.keys())
+            for asset in all_assets:
+                target_w = new_target_weights.get(asset, 0.0)
+                drifted_w = drifted_weights.get(asset, 0.0)
+                if abs(target_w - drifted_w) > REBALANCE_THRESHOLD:
+                    needs_rebalance_by_threshold = True
+                    break
+        
+        # 综合判断是否再平衡
+        should_actually_rebalance = (should_rebalance and needs_rebalance_by_threshold) or not prev_targets or is_in_transition
+        
         # --- Determine actual weights for today ---
-        if should_rebalance or not prev_targets:
-            # Rebalance to new target weights
+        if should_actually_rebalance:
             final_weights = new_target_weights
         else:
-            # Keep drifted weights (no rebalancing)
-            final_weights = drifted_weights
+            final_weights = drifted_weights if drifted_weights else new_target_weights
+        
+        # === 优化2: 波动率目标机制 ===
+        # 根据实现波动率调整仓位
+        if len(portfolio_returns_history) >= VOL_LOOKBACK:
+            realized_vol = np.std(portfolio_returns_history[-VOL_LOOKBACK:]) * np.sqrt(252)
+            if realized_vol > 0:
+                vol_scalar = TARGET_VOL / realized_vol
+                vol_scalar = max(VOL_SCALAR_MIN, min(vol_scalar, VOL_SCALAR_MAX))
+                
+                # 应用波动率缩放
+                scaled_weights = {}
+                total_weight = sum(final_weights.values())
+                if total_weight > 0:
+                    for asset, w in final_weights.items():
+                        scaled_weights[asset] = w * vol_scalar
+                    # 确保总权重不超过1（超出部分变为现金）
+                    total_scaled = sum(scaled_weights.values())
+                    if total_scaled > 1.0:
+                        for asset in scaled_weights:
+                            scaled_weights[asset] /= total_scaled
+                    final_weights = scaled_weights
+        
+        # === 优化3: 动态止损机制 ===
+        # 组合回撤超过阈值时减仓
+        current_drawdown = (current_val - peak_nav) / peak_nav if peak_nav > 0 else 0
+        
+        if not in_stop_loss_mode and current_drawdown < DRAWDOWN_STOP_LOSS:
+            # 触发止损
+            in_stop_loss_mode = True
+        elif in_stop_loss_mode and current_drawdown > DRAWDOWN_RECOVERY_THRESHOLD:
+            # 回撤恢复，解除止损
+            in_stop_loss_mode = False
+        
+        if in_stop_loss_mode:
+            # 止损模式：所有风险资产减仓
+            stop_loss_weights = {}
+            for asset, w in final_weights.items():
+                # WTMF视为避险资产，不减仓
+                if asset in ['WTMF']:
+                    stop_loss_weights[asset] = w
+                else:
+                    stop_loss_weights[asset] = w * (1 - DRAWDOWN_REDUCE_RATIO)
+            final_weights = stop_loss_weights
         
         # --- Calculate Turnover (Trading Volume) ---
         daily_turnover = 0.0
         
         if not prev_targets:
-            # First day: turnover is the sum of all positions (building portfolio)
             daily_turnover = sum(final_weights.values())
-        elif should_rebalance:
-            # Only count turnover on rebalance days
+        elif should_actually_rebalance:
             diff_sum = 0.0
             all_assets = set(final_weights.keys()) | set(drifted_weights.keys())
             
@@ -1361,19 +2399,22 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
                 w_drift = drifted_weights.get(t, 0.0)
                 diff_sum += abs(w_tgt - w_drift)
             
-            # Don't forget Cash difference
             curr_cash_w = max(0.0, 1.0 - sum(final_weights.values()))
             prev_cash_w = max(0.0, 1.0 - sum(drifted_weights.values())) if drifted_weights else 0
             diff_sum += abs(curr_cash_w - prev_cash_w)
             
-            daily_turnover = diff_sum / 2.0 # One-sided turnover
+            daily_turnover = diff_sum / 2.0
             
-        # Record history
-        rec = targets.copy() # Record original logic targets for debug
+        # Record history (with enhanced info)
+        rec = targets.copy()
         rec['Date'] = date
         rec['State'] = s
+        rec['RawState'] = raw_state  # 原始未确认状态
         rec['Turnover'] = daily_turnover
-        rec['Rebalanced'] = should_rebalance or not prev_targets
+        rec['Rebalanced'] = should_actually_rebalance
+        rec['InStopLoss'] = in_stop_loss_mode
+        rec['Drawdown'] = current_drawdown
+        rec['InTransition'] = is_in_transition
         history_records.append(rec)
         
         # Calculate Portfolio Return for this day
@@ -1386,8 +2427,15 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
                 if t in current_rets:
                     daily_ret += w * current_rets[t]
         
+        # 记录收益用于波动率计算
+        portfolio_returns_history.append(daily_ret)
+        
         current_val = current_val * (1 + daily_ret)
         portfolio_values.append(current_val)
+        
+        # 更新历史最高净值
+        if current_val > peak_nav:
+            peak_nav = current_val
         
         # Prepare for next iteration
         prev_targets = final_weights
@@ -1505,20 +2553,6 @@ MACRO_STATES = {
         "desc": "✅ 市场运行平稳，波动率低且趋势向上。建议维持**标准增长配置**，享受复利增长。",
         "bg_color": "#e6f4ea", "border_color": "#1e8e3e", "icon": "🟢"
     }
-}
-
-ASSET_NAMES = {
-    'IWY': '美股成长 (Russell Top 200 Growth)',
-    'WTMF': '危机Alpha (Managed Futures)',
-    'LVHI': '美股红利 (High Div Low Vol)',
-    'G3B.SI': '新加坡蓝筹 (STI ETF)',
-    'MBH.SI': '新元债券 (Govt Bond)',
-    'GSD.SI': '黄金 (Gold)',
-    'SRT.SI': 'S-REITs (Supermarket)',
-    'AJBU.SI': 'Keppel DC REIT',
-    'TLT': '美债 (20Y Treasury)',
-    'SPY': '标普500 (S&P 500)',
-    'OTHERS': '其他/待清理资产 (Others)'
 }
 
 # --- Utility Functions for Backtest ---
@@ -1866,7 +2900,6 @@ def render_manual_data_import():
     with st.expander("📂 手动导入宏观数据 (网络受限时使用)", expanded=False):
         st.info("如果网络受限导致 FRED 数据 (UNRATE, T10Y2Y) 获取失败，请手动下载并上传 CSV 文件。")
         col_u1, col_u2 = st.columns(2)
-        import time
 
         # UNRATE Import
         with col_u1:
@@ -2172,7 +3205,10 @@ def render_factor_dashboard(metrics):
         value_regime=metrics['value_regime'], 
         asset_trends=metrics.get('asset_trends', {}),
         vix=metrics.get('vix'),
-        yield_curve=metrics.get('yield_curve')
+        yield_curve=metrics.get('yield_curve'),
+        sahm=metrics.get('sahm'),
+        corr=metrics.get('corr'),
+        yc_recently_inverted=metrics.get('yc_un_invert', False)
     )
     
     if adjustments:
@@ -2212,10 +3248,10 @@ def render_data_health_badges(metrics):
             for w in warnings:
                 st.markdown(f"- {w}")
 
-def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None, price_info=None):
+def render_rebalancing_table(state, current_holdings, total_value, is_gold_bear, is_value_regime, asset_trends=None, vix=None, yield_curve=None, price_info=None, sahm=None, corr=None, yc_recently_inverted=False):
     """Renders the rebalancing table with live prices."""
     if asset_trends is None: asset_trends = {}
-    targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime, asset_trends=asset_trends, vix=vix, yield_curve=yield_curve)
+    targets = get_target_percentages(state, gold_bear=is_gold_bear, value_regime=is_value_regime, asset_trends=asset_trends, vix=vix, yield_curve=yield_curve, sahm=sahm, corr=corr, yc_recently_inverted=yc_recently_inverted)
     
     # Add Current Holdings not in targets
     all_tickers = set(targets.keys()).union(current_holdings.keys())
@@ -3031,7 +4067,10 @@ def render_state_machine_check():
                     value_regime=metrics['value_regime'],
                     asset_trends=metrics.get('asset_trends', {}),
                     vix=metrics.get('vix'),
-                    yield_curve=metrics.get('yield_curve')
+                    yield_curve=metrics.get('yield_curve'),
+                    sahm=metrics.get('sahm'),
+                    corr=metrics.get('corr'),
+                    yc_recently_inverted=metrics.get('yc_un_invert', False)
                 )
                 targets = get_target_percentages(
                     metrics['state'],
@@ -3039,7 +4078,10 @@ def render_state_machine_check():
                     value_regime=metrics['value_regime'],
                     asset_trends=metrics.get('asset_trends', {}),
                     vix=metrics.get('vix'),
-                    yield_curve=metrics.get('yield_curve')
+                    yield_curve=metrics.get('yield_curve'),
+                    sahm=metrics.get('sahm'),
+                    corr=metrics.get('corr'),
+                    yc_recently_inverted=metrics.get('yc_un_invert', False)
                 )
                 price_info = get_live_prices(set(targets.keys()).union(current_holdings.keys()))
                 
@@ -3054,7 +4096,23 @@ def render_state_machine_check():
                     vix=metrics.get('vix'),
                     yield_curve=metrics.get('yield_curve'),
                     price_info=price_info,
+                    sahm=metrics.get('sahm'),
+                    corr=metrics.get('corr'),
+                    yc_recently_inverted=metrics.get('yc_un_invert', False)
                 )
+
+                # 执行建议提示
+                st.markdown("---")
+                execution_tips = generate_execution_tips(
+                    metrics, 
+                    change_info, 
+                    current_holdings=current_holdings,
+                    targets=targets
+                )
+                render_execution_tips(execution_tips)
+
+                # 增强版深度诊断
+                render_enhanced_diagnosis(metrics, current_holdings, total_value, targets, change_info)
 
                 render_export_options(metrics, adjustments, targets)
                 if history:
