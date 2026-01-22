@@ -844,9 +844,10 @@ def generate_email_risk_exposure(targets):
     return bars_html
 
 
-def generate_email_v15_status(metrics, state):
+def generate_email_v15_status(metrics, state, change_info=None):
     """
     生成v1.5优化机制状态的邮件HTML
+    change_info: 包含 days_in_state 等信息的字典
     """
     vix = metrics.get('vix', 15)
     sahm = metrics.get('sahm', 0)
@@ -855,6 +856,22 @@ def generate_email_v15_status(metrics, state):
     yc_un_invert = metrics.get('yc_un_invert', False)
     
     status_items = []
+    
+    # 0. 信号持续天数与确认状态
+    days_in_state = change_info.get('days_in_state') if change_info else None
+    if days_in_state is not None:
+        if days_in_state <= SIGNAL_CONFIRM_DAYS:
+            confirm_text = f"确认中 ({days_in_state}/{SIGNAL_CONFIRM_DAYS}天)"
+            confirm_color = "#fa8c16"  # 橙色警示
+        else:
+            confirm_text = f"已确认 ({days_in_state}天)"
+            confirm_color = "#52c41a"  # 绿色
+        
+        status_items.append({
+            'name': '🔄 信号状态',
+            'value': confirm_text,
+            'color': confirm_color
+        })
     
     # 1. 现金缓冲状态
     if state == "EXTREME_ACCUMULATION":
@@ -1124,7 +1141,7 @@ def generate_email_execution_tips(metrics, state):
     return tips_html
 
 
-def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date):
+def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date, change_info=None):
     target_rows = ""
     for t, w in targets.items():
         if w > 0:
@@ -1147,9 +1164,19 @@ def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_dat
 
     yc_val = metrics.get('yield_curve', 0)
     state = metrics.get('state', 'NEUTRAL')
+    
+    # 信号持续天数信息
+    days_in_state = change_info.get('days_in_state') if change_info else None
+    days_info = ""
+    if days_in_state is not None:
+        if days_in_state <= SIGNAL_CONFIRM_DAYS:
+            days_info = f" (确认中 {days_in_state}/{SIGNAL_CONFIRM_DAYS}天)"
+        else:
+            days_info = f" (持续{days_in_state}天)"
+    
     summary_points = [
         f"数据截至 {report_date}",
-        f"状态: {s_conf['display']}",
+        f"状态: {s_conf['display']}{days_info}",
         f"VIX {metrics['vix']:.1f} ({'⚠️ 高波动' if metrics['fear'] else '✅ 正常'})",
         f"10Y-2Y {yc_val:.2f}% ({'⚠️ 倒挂/解倒挂' if (yc_val < 0 or metrics.get('yc_un_invert', False)) else '✅ 正常'})",
         f"Sahm {metrics['sahm']:.2f} ({'⚠️ 衰退信号' if metrics['recession'] else '✅ 未触发'})"
@@ -1157,7 +1184,7 @@ def render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_dat
     summary_html = "".join([f"<span style='display:inline-block;background:#f0f4ff;color:#1a73e8;padding:6px 10px;border-radius:20px;margin:4px 4px 0 0;font-size:13px;'>{p}</span>" for p in summary_points])
     
     # 生成v1.5优化机制状态
-    v15_status_html = generate_email_v15_status(metrics, state)
+    v15_status_html = generate_email_v15_status(metrics, state, change_info)
     
     # 生成风险暴露分析
     risk_exposure_html = generate_email_risk_exposure(targets)
@@ -1246,6 +1273,16 @@ def send_strategy_email(metrics, config):
     sent_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     report_date = metrics.get('date', sent_at.split(' ')[0])
     
+    # 计算信号持续天数
+    history = load_state_history()
+    current_date = metrics.get('latest_date')
+    if current_date is None:
+        try:
+            current_date = datetime.date.fromisoformat(report_date)
+        except:
+            current_date = datetime.date.today()
+    change_info = get_state_change_info(history, state, current_date)
+    
     targets = get_target_percentages(
         state,
         gold_bear=metrics['gold_bear'],
@@ -1270,7 +1307,7 @@ def send_strategy_email(metrics, config):
         yc_recently_inverted=metrics.get('yc_un_invert', False)
     )
 
-    html_content = render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date)
+    html_content = render_email_html(metrics, targets, adjustments, s_conf, sent_at, report_date, change_info)
 
     msg = MIMEMultipart()
     msg['From'] = email_from
