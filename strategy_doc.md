@@ -140,9 +140,9 @@
 
 ### 快速上手路径
 1) **识别宏观状态**：先用"状态判定逻辑"确定当前属于 6 种状态之一。
-2) **套用基础配置**：按"资产配置矩阵"得到初始目标仓位。
+2) **套用基础配置**：按"资产配置矩阵"得到初始目标仓位（v1.5: CAUTIOUS_VOL支持VIX分层）。
 3) **检查动态风控触发**：逐条核对下表的触发条件，若满足则立即执行对应调整。
-4) **应用新增优化模块**：按顺序检查 Sahm预警、解倒挂保护、相关性调整、VIX均值回归。
+4) **应用新增优化模块**：按顺序检查双均线趋势、市场广度、Sahm预警、解倒挂保护、相关性渐进调整、VIX均值回归、现金缓冲。
 5) **执行风格/趋势过滤**：应用黄金趋势过滤、风格轮动与全局趋势过滤，得到最终持仓。
 6) **参考执行建议**：根据波动率、状态持续时间等决定执行节奏。
 
@@ -158,7 +158,13 @@
 | **YIELD_CURVE_CUTOFF** | -0.30% | 深度倒挂阈值 |
 | **SAHM_EARLY_WARNING_LO** | 0.30 | Sahm预警起点 |
 | **SAHM_EARLY_WARNING_HI** | 0.50 | Sahm衰退确认点 |
+| **CORR_MID_THRESHOLD** | 0.15 | 相关性开始关注阈值 (v1.5) |
 | **CORR_HIGH_THRESHOLD** | 0.30 | 股债相关性失效阈值 |
+| **CORR_MAX_REALLOC** | 15% | 相关性调整最大转移比例 (v1.5) |
+| **CASH_BUFFER_BASE** | 3% | 基础现金缓冲 (v1.5) |
+| **CASH_BUFFER_MAX** | 12% | 最大现金缓冲 (v1.5) |
+| **MARKET_BREADTH_LOW** | 30% | 市场广度差阈值 (v1.5) |
+| **MARKET_BREADTH_MID** | 50% | 市场广度一般阈值 (v1.5) |
 | **REBALANCE_THRESHOLD** | 5% | 再平衡容忍带 |
 | **SIGNAL_CONFIRM_DAYS** | 2 | 状态确认天数 |
 | **STATE_TRANSITION_DAYS** | 3 | 状态过渡天数 |
@@ -175,19 +181,28 @@
 | **VIX Booster - 加仓** | VIX < 13 | WTMF 全部转入 IWY；MBH 减半转入 IWY | 仅 NEUTRAL |
 | **VIX Booster - 减仓** | VIX > 20 | IWY 减仓 20% 转入 WTMF | 仅 NEUTRAL |
 | **Yield Curve Guard** | 10Y-2Y < -0.30% | MBH.SI 削减 70% 转入 WTMF | DEFLATION_RECESSION, CAUTIOUS_TREND |
-| **Global Trend Filter** | 任意资产 Price < MA200 | 清仓该资产；NEUTRAL时若IWY强则转IWY，否则转WTMF | 除 EXTREME_ACCUMULATION |
+| **双均线趋势过滤** (v1.5) | 价格<MA200 且 MA50<MA200 | 强熊市减仓70%转WTMF；弱熊市减仓30% | 除 EXTREME_ACCUMULATION |
 | **IWY Safety Valve** | IWY < MA200 | IWY削减50%（VIX>25时削减80%）转WTMF | 除 EXTREME_ACCUMULATION |
 | **Gold Trend Filter** | 黄金 < MA200 | 清仓黄金转入 WTMF | 所有状态 |
 
-#### B. 新增优化层（v1.4）
+#### B. 优化层 v1.4
 
 | 触发器 | 触发条件 | 操作 | 适用状态 |
 | :--- | :--- | :--- | :--- |
 | **Sahm早期预警** | 0.30 ≤ Sahm < 0.50 | IWY线性减仓0-50%（按Sahm值比例）转WTMF | NEUTRAL, CAUTIOUS_VOL |
 | **解倒挂保护期** | 曲线转正 且 近6月曾深度倒挂(<-0.20%) | IWY减仓20%，50%转MBH，50%转WTMF | NEUTRAL, CAUTIOUS_VOL |
-| **相关性失效调整** | 股债相关性 > 0.30 且 MBH > 10% | MBH减10%转入WTMF | NEUTRAL, CAUTIOUS_VOL, CAUTIOUS_TREND |
 | **VIX均值回归加仓** | 近期VIX峰值≥25 且 当前VIX<峰值×0.8 且 WTMF>10% | WTMF减10%转入IWY | NEUTRAL, CAUTIOUS_VOL |
 | **动量强度分层** | IWY处于中性区（MA±5%内） | IWY减仓15%转WTMF | 除 EXTREME_ACCUMULATION |
+
+#### C. 优化层 v1.5（新增）
+
+| 触发器 | 触发条件 | 操作 | 适用状态 |
+| :--- | :--- | :--- | :--- |
+| **CAUTIOUS_VOL VIX分层** | VIX 25-30 / VIX 30+ | IWY 30%→20%→10%, WTMF 30%→35%→40% | 仅 CAUTIOUS_VOL |
+| **相关性渐进响应** | 相关性 > 0.15 (渐进) | MBH线性减仓(0-15%)，70%转WTMF，30%转黄金 | NEUTRAL, CAUTIOUS_VOL, CAUTIOUS_TREND |
+| **市场广度调整** | 广度 < 50% (渐进) | 广度<30%: 权益减15%；广度<50%: 权益减5% | 除 EXTREME_ACCUMULATION |
+| **现金缓冲** | VIX > 18 (渐进) | 保留3-12%现金，按VIX线性增加 | 除 EXTREME_ACCUMULATION |
+| **止损分阶段恢复** | 触发止损后 | -10%:50%仓位 → -7.5%:70% → -5%:85% → -2.5%:100% | 所有状态 |
 
 ---
 
