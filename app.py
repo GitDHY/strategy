@@ -22,98 +22,132 @@ st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer v1.5")
 
 # --- Helper Functions for Indicators ---
 
-# === 原有阈值 ===
-VIX_BOOST_LO = 13.0
-VIX_CUT_HI = 20.0
-VIX_PANIC = 25.0
-YIELD_CURVE_CUTOFF = -0.30
+# === 原有阈值 (v1.6 收益增强优化) ===
+VIX_BOOST_LO = 14.0                 # 提高: 13→14，减少激进模式误触发
+VIX_CUT_HI = 23.0                   # 提高: 20→23，延迟防御（VIX 20-23是正常波动）
+VIX_PANIC = 28.0                    # 提高: 25→28，提高恐慌阈值
+YIELD_CURVE_CUTOFF = -0.35          # 放宽: -0.30→-0.35，减少误报
 
-# === 优化参数 ===
-# 1. 波动率目标机制
-TARGET_VOL = 0.12  # 年化12%目标波动率
-VOL_LOOKBACK = 20  # 计算实现波动率的回看天数
-VOL_SCALAR_MAX = 1.5  # 最大波动率缩放因子(允许加杠杆上限)
-VOL_SCALAR_MIN = 0.3  # 最小波动率缩放因子(最大减仓幅度)
+# === 优化参数 (v1.6 收益增强) ===
+# 1. 波动率目标机制 - 提高目标波动率以获取更高收益
+TARGET_VOL = 0.14                   # 提高: 0.12→0.14，接受更高波动换取收益
+VOL_LOOKBACK = 20                   # 保持
+VOL_SCALAR_MAX = 1.8                # 提高: 1.5→1.8，允许更多顺势加仓
+VOL_SCALAR_MIN = 0.4                # 提高: 0.3→0.4，减少过度减仓
 
-# 2. 动态止损机制
-DRAWDOWN_STOP_LOSS = -0.10  # 回撤止损线: -10%
-DRAWDOWN_REDUCE_RATIO = 0.5  # 触发止损时减仓比例
-DRAWDOWN_RECOVERY_THRESHOLD = -0.05  # 回撤恢复到-5%才解除止损
+# 2. 动态止损机制 - 放宽止损线，减少误杀
+DRAWDOWN_STOP_LOSS = -0.12          # 放宽: -0.10→-0.12，减少假突破止损
+DRAWDOWN_REDUCE_RATIO = 0.4         # 降低: 0.5→0.4，止损减仓更温和
+DRAWDOWN_RECOVERY_THRESHOLD = -0.06 # 放宽: -0.05→-0.06
 
-# 3. VIX响应平滑化参数
-VIX_SMOOTH_START = 15.0  # VIX平滑响应起始点
-VIX_SMOOTH_END = 30.0  # VIX平滑响应终止点
-VIX_MAX_REDUCTION = 0.40  # 最大减仓幅度40%
+# 3. VIX响应平滑化参数 - 提高响应阈值
+VIX_SMOOTH_START = 18.0             # 提高: 15→18，减少低VIX区间的拖累
+VIX_SMOOTH_END = 32.0               # 提高: 30→32
+VIX_MAX_REDUCTION = 0.35            # 降低: 0.40→0.35，减少最大减仓
 
-# 4. 信号确认延迟
-SIGNAL_CONFIRM_DAYS = 2  # 状态切换需要连续确认的天数
+# 4. 信号确认延迟 - 对抄底信号更激进
+SIGNAL_CONFIRM_DAYS = 2             # 保持（将对EXTREME_ACCUMULATION特殊处理）
 
-# 5. 再平衡容忍带
-REBALANCE_THRESHOLD = 0.05  # 权重偏离超过5%才再平衡
+# 5. 再平衡容忍带 - 略微放宽减少交易成本
+REBALANCE_THRESHOLD = 0.06          # 提高: 0.05→0.06
 
-# 6. 状态转换平滑
-STATE_TRANSITION_DAYS = 3  # 状态切换过渡天数
+# 6. 状态转换平滑 - 加快过渡
+STATE_TRANSITION_DAYS = 2           # 降低: 3→2，更快响应
 
-# === 新增优化参数（低过拟合风险）===
-# 7. 动量强度分层配置
-MOMENTUM_STRONG_THRESHOLD = 1.05  # 强势区: Price > MA * 1.05
-MOMENTUM_WEAK_THRESHOLD = 0.95    # 弱势区: Price < MA * 0.95
-MOMENTUM_NEUTRAL_REDUCTION = 0.15 # 中性区减仓比例
+# === 新增优化参数（低过拟合风险）v1.6 ===
+# 7. 动量强度分层配置 - 缩窄中性区，减少不必要减仓
+MOMENTUM_STRONG_THRESHOLD = 1.03    # 降低: 1.05→1.03
+MOMENTUM_WEAK_THRESHOLD = 0.93      # 降低: 0.95→0.93（更窄的熊市定义）
+MOMENTUM_NEUTRAL_REDUCTION = 0.08   # 降低: 0.15→0.08，中性区减仓更温和
 
-# 8. Sahm Rule 预警增强
-SAHM_EARLY_WARNING_LO = 0.30  # 早期预警起点
-SAHM_EARLY_WARNING_HI = 0.50  # 衰退确认点
-SAHM_REDUCTION_RATE = 0.50    # 预警区间最大减仓比例 (0.30-0.50区间线性)
+# 8. Sahm Rule 预警增强 - 收窄预警区间
+SAHM_EARLY_WARNING_LO = 0.35        # 提高: 0.30→0.35，减少误报
+SAHM_EARLY_WARNING_HI = 0.50        # 保持
+SAHM_REDUCTION_RATE = 0.40          # 降低: 0.50→0.40
 
-# 9. 收益率曲线解倒挂延保护
-YC_UNINVERT_PROTECTION_MONTHS = 12  # 解倒挂后保护期（月）
-YC_UNINVERT_REDUCTION = 0.20        # 保护期内IWY减仓比例
+# 9. 收益率曲线解倒挂延保护 - 缩短保护期
+YC_UNINVERT_PROTECTION_MONTHS = 9   # 降低: 12→9
+YC_UNINVERT_REDUCTION = 0.15        # 降低: 0.20→0.15
 
-# 10. VIX均值回归加仓
-VIX_MEAN_REVERSION_PEAK = 25.0      # VIX峰值阈值
-VIX_MEAN_REVERSION_RATIO = 0.80     # 回落比例阈值 (当前 < 峰值*0.8)
-VIX_MEAN_REVERSION_BOOST = 0.10     # 加仓幅度
+# 10. VIX均值回归加仓 - 增强加仓力度
+VIX_MEAN_REVERSION_PEAK = 23.0      # 降低: 25→23，更早触发加仓
+VIX_MEAN_REVERSION_RATIO = 0.75     # 降低: 0.80→0.75，更早确认回落
+VIX_MEAN_REVERSION_BOOST = 0.12     # 提高: 0.10→0.12
 
-# 11. 相关性动态再配置（改为渐进响应）
-CORR_MID_THRESHOLD = 0.15           # 开始关注的相关性阈值
-CORR_HIGH_THRESHOLD = 0.30          # 强调整的相关性阈值
-CORR_MAX_REALLOC = 0.15             # 最大转移比例 (渐进式从0到15%)
+# 11. 相关性动态再配置 - 放宽触发条件
+CORR_MID_THRESHOLD = 0.18           # 提高: 0.15→0.18
+CORR_HIGH_THRESHOLD = 0.35          # 提高: 0.30→0.35
+CORR_MAX_REALLOC = 0.12             # 降低: 0.15→0.12
 
-# === 新增优化参数 v1.5 ===
-# 12. 现金缓冲机制
-CASH_BUFFER_BASE = 0.03             # 基础现金缓冲 3%
-CASH_BUFFER_VIX_THRESHOLD = 18.0    # VIX高于此值增加现金
-CASH_BUFFER_MAX = 0.12              # 最大现金仓位 12%
-CASH_BUFFER_VIX_SCALE = 0.015       # 每5点VIX增加的现金比例
+# === 新增优化参数 v1.7 收益最大化 ===
+# 12. 现金缓冲机制 - 完全禁用（用户要求）
+CASH_BUFFER_BASE = 0.0              # 禁用: 0.02→0
+CASH_BUFFER_VIX_THRESHOLD = 999.0   # 禁用: 永远不触发
+CASH_BUFFER_MAX = 0.0               # 禁用: 0.10→0
+CASH_BUFFER_VIX_SCALE = 0.0         # 禁用: 0.012→0
 
-# 13. CAUTIOUS_VOL VIX分层
+# 13. CAUTIOUS_VOL VIX分层 - v1.7 更激进的权益配置，动态IWY/WTMF轮换
 CAUTIOUS_VOL_VIX_TIERS = {
-    # VIX区间: (IWY权重, WTMF权重调整)
-    'tier1': (20, 25, 0.30, 0.30),   # 20-25: IWY 30%, WTMF 30%
-    'tier2': (25, 30, 0.20, 0.35),   # 25-30: IWY 20%, WTMF 35%
-    'tier3': (30, 999, 0.10, 0.40),  # 30+:   IWY 10%, WTMF 40%
+    # VIX区间: (lo, hi, IWY权重, WTMF权重) - 更激进轮换
+    'tier1': (20, 25, 0.40, 0.20),   # 20-25: IWY↑40%, WTMF↓20% (低波时更多成长)
+    'tier2': (25, 30, 0.30, 0.30),   # 25-30: 均衡
+    'tier3': (30, 40, 0.20, 0.40),   # 30-40: VIX高时WTMF对冲
+    'tier4': (40, 999, 0.10, 0.50),  # 40+:   极端波动，WTMF主导
 }
 
-# 14. 双均线趋势确认
-TREND_MA_SHORT = 50                 # 短期均线
-TREND_MA_LONG = 200                 # 长期均线
-WEAK_BEAR_REDUCTION = 0.30          # 弱熊市清仓幅度 (可能是回调)
-STRONG_BEAR_REDUCTION = 0.70        # 强熊市清仓幅度
+# 14. 双均线趋势确认 - 降低减仓幅度
+TREND_MA_SHORT = 50                 # 保持
+TREND_MA_LONG = 200                 # 保持
+WEAK_BEAR_REDUCTION = 0.20          # 降低: 0.30→0.20
+STRONG_BEAR_REDUCTION = 0.55        # 降低: 0.70→0.55
 
-# 15. 止损分阶段恢复
+# 15. 止损分阶段恢复 - 更快恢复
 STOP_LOSS_RECOVERY_STAGES = [
-    # (回撤阈值, 恢复仓位比例)
-    (-0.10, 0.50),   # -10%: 只恢复50%仓位
-    (-0.075, 0.70),  # -7.5%: 恢复70%仓位
-    (-0.05, 0.85),   # -5%: 恢复85%仓位
-    (-0.025, 1.00),  # -2.5%: 完全恢复
+    # (回撤阈值, 恢复仓位比例) - 优化后更快恢复
+    (-0.12, 0.55),   # -12%: 55%仓位 (原-10%, 50%)
+    (-0.08, 0.75),   # -8%:  75%仓位 (原-7.5%, 70%)
+    (-0.05, 0.90),   # -5%:  90%仓位 (原-5%, 85%)
+    (-0.02, 1.00),   # -2%:  完全恢复 (原-2.5%)
 ]
 
-# 16. 跨资产动量
-MARKET_BREADTH_LOW = 0.30           # 广度<30%时保守
-MARKET_BREADTH_MID = 0.50           # 广度<50%时略保守
-BREADTH_LOW_REDUCTION = 0.15        # 低广度时权益减仓比例
-BREADTH_MID_REDUCTION = 0.05        # 中等广度时权益减仓比例
+# 16. 跨资产动量 - 降低减仓力度
+MARKET_BREADTH_LOW = 0.25           # 降低: 0.30→0.25
+MARKET_BREADTH_MID = 0.45           # 降低: 0.50→0.45
+BREADTH_LOW_REDUCTION = 0.10        # 降低: 0.15→0.10
+BREADTH_MID_REDUCTION = 0.03        # 降低: 0.05→0.03
+
+# === 新增 v1.6 收益增强参数 ===
+# 17. 趋势顺势加仓（新增）
+TREND_BOOST_THRESHOLD = 1.08        # Price > MA * 1.08 时启动顺势加仓
+TREND_BOOST_AMOUNT = 0.08           # 从WTMF/MBH转移8%到IWY
+TREND_BOOST_VIX_MAX = 18.0          # 只在VIX<18时启用
+
+# 18. 抄底加速确认（新增）
+EXTREME_CONFIRM_DAYS = 1            # EXTREME_ACCUMULATION只需1天确认（更快抄底）
+
+# 19. 牛市WTMF最小化（v1.7 完全取消）
+NEUTRAL_MIN_WTMF = 0.0              # NEUTRAL状态WTMF=0%（原5%），全部转IWY
+NEUTRAL_WTMF_BOOST_TO_IWY = True    # 启用WTMF→IWY转换
+
+# === v1.7 新增: 成长/红利/WTMF动态轮换参数 ===
+# 20. VIX驱动的成长↔红利轮换
+VIX_GROWTH_TO_VALUE_START = 22.0    # VIX>22时开始从IWY转向LVHI
+VIX_GROWTH_TO_VALUE_FULL = 35.0     # VIX≥35时达到最大转换比例
+GROWTH_TO_VALUE_MAX_SHIFT = 0.20    # 最大从IWY转移20%到LVHI
+
+# 21. 趋势强度驱动的成长↔WTMF轮换
+TREND_STRONG_BULL = 1.10            # Price > MA*1.10: 强牛市
+TREND_MILD_BULL = 1.03              # Price > MA*1.03: 温和牛市
+TREND_MILD_BEAR = 0.97              # Price < MA*0.97: 温和熊市
+TREND_STRONG_BEAR_LINE = 0.90       # Price < MA*0.90: 强熊市
+# 转换幅度
+BULL_IWY_BOOST = 0.10               # 强牛时从WTMF转10%到IWY
+BEAR_WTMF_BOOST = 0.15              # 强熊时从IWY转15%到WTMF
+
+# 22. 红利相对强弱
+VALUE_OUTPERFORM_THRESHOLD = 0.03   # LVHI相对IWY跑赢3%时增配红利
+VALUE_UNDERPERFORM_THRESHOLD = -0.05 # LVHI相对IWY跑输5%时减配红利
+VALUE_ROTATION_AMOUNT = 0.08        # 轮换幅度8%
 
 # === 资产类别映射 (用于风险暴露分析和邮件生成) ===
 ASSET_CATEGORIES = {
@@ -145,6 +179,7 @@ ASSET_NAMES = {
 
 SCHEDULER_LOCK = os.path.join(os.path.dirname(__file__), "data", "scheduler.lock")
 STATE_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "data", "state_history.json")
+PORTFOLIO_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "data", "portfolio_history.json")
 os.makedirs(os.path.dirname(SCHEDULER_LOCK), exist_ok=True)
 os.makedirs(os.path.dirname(STATE_HISTORY_FILE), exist_ok=True)
 
@@ -541,6 +576,156 @@ def get_state_change_info(history, current_state, current_date):
         "changed_on": changed_on,
         "days_in_state": days_in_state,
     }
+
+
+# === 持仓历史追踪与回撤计算 ===
+def load_portfolio_history():
+    """加载持仓历史记录"""
+    try:
+        if os.path.exists(PORTFOLIO_HISTORY_FILE):
+            with open(PORTFOLIO_HISTORY_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        log_event("ERROR", "portfolio_history_load_failed", {"err": str(e)})
+    return {"records": [], "peak_value": 0, "cost_basis": 0}
+
+
+def save_portfolio_history(history):
+    """保存持仓历史记录"""
+    try:
+        with open(PORTFOLIO_HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        log_event("ERROR", "portfolio_history_save_failed", {"err": str(e)})
+
+
+def record_portfolio_snapshot(total_value, holdings_dict, state=None):
+    """
+    记录当前持仓快照，用于计算回撤
+    total_value: 当前总市值
+    holdings_dict: {ticker: value} 当前持仓
+    """
+    history = load_portfolio_history()
+    date_str = datetime.date.today().isoformat()
+    
+    record = {
+        "date": date_str,
+        "ts": datetime.datetime.now().isoformat(timespec='seconds'),
+        "total_value": total_value,
+        "holdings": holdings_dict,
+        "state": state
+    }
+    
+    records = history.get("records", [])
+    # 同一天只保留最新记录
+    if records and records[-1].get("date") == date_str:
+        records[-1] = record
+    else:
+        records.append(record)
+    
+    # 只保留最近90天数据
+    if len(records) > 90:
+        records = records[-90:]
+    
+    # 更新历史最高净值
+    peak_value = history.get("peak_value", 0)
+    if total_value > peak_value:
+        peak_value = total_value
+    
+    history["records"] = records
+    history["peak_value"] = peak_value
+    
+    save_portfolio_history(history)
+    return history
+
+
+def calculate_portfolio_drawdown(current_value, history=None):
+    """
+    计算当前组合回撤
+    返回: (drawdown_pct, peak_value, days_since_peak, in_stop_loss_zone, recovery_ratio)
+    """
+    if history is None:
+        history = load_portfolio_history()
+    
+    peak_value = history.get("peak_value", 0)
+    if peak_value <= 0:
+        return 0, current_value, 0, False, 1.0
+    
+    drawdown_pct = (current_value - peak_value) / peak_value
+    
+    # 计算距离峰值的天数
+    records = history.get("records", [])
+    days_since_peak = 0
+    for rec in reversed(records):
+        if rec.get("total_value", 0) >= peak_value * 0.999:  # 允许0.1%误差
+            break
+        days_since_peak += 1
+    
+    # 判断是否在止损区间
+    in_stop_loss_zone = drawdown_pct < DRAWDOWN_STOP_LOSS
+    
+    # 计算恢复比例 (分阶段恢复)
+    recovery_ratio = 1.0
+    if in_stop_loss_zone:
+        for threshold, ratio in STOP_LOSS_RECOVERY_STAGES:
+            if drawdown_pct < threshold:
+                recovery_ratio = ratio
+                break
+    
+    return drawdown_pct, peak_value, days_since_peak, in_stop_loss_zone, recovery_ratio
+
+
+def get_stop_loss_status(current_value, history=None):
+    """
+    获取止损状态的详细信息
+    返回: dict with status details
+    """
+    drawdown_pct, peak_value, days_since_peak, in_stop_loss, recovery_ratio = calculate_portfolio_drawdown(current_value, history)
+    
+    status = {
+        "current_value": current_value,
+        "peak_value": peak_value,
+        "drawdown_pct": drawdown_pct,
+        "days_since_peak": days_since_peak,
+        "in_stop_loss": in_stop_loss,
+        "recovery_ratio": recovery_ratio,
+        "should_reduce": in_stop_loss,
+        "reduction_pct": (1 - recovery_ratio) * 100 if in_stop_loss else 0,
+    }
+    
+    # 判断恢复阶段
+    if in_stop_loss:
+        status["stage"] = "止损中"
+        status["stage_color"] = "#f5222d"
+        status["advice"] = f"风险资产建议减仓至 {recovery_ratio*100:.0f}%"
+    elif drawdown_pct < DRAWDOWN_RECOVERY_THRESHOLD:
+        status["stage"] = "恢复中"
+        status["stage_color"] = "#faad14"
+        status["advice"] = f"回撤{drawdown_pct*100:.1f}%，接近止损线，保持警惕"
+    else:
+        status["stage"] = "正常"
+        status["stage_color"] = "#52c41a"
+        status["advice"] = "持仓健康，无需止损调整"
+    
+    return status
+
+
+def reset_portfolio_peak(new_peak_value=None):
+    """
+    重置历史最高净值（用于注入新资金或手动调整）
+    """
+    history = load_portfolio_history()
+    if new_peak_value is not None:
+        history["peak_value"] = new_peak_value
+    else:
+        # 使用最近记录的最高值
+        records = history.get("records", [])
+        if records:
+            history["peak_value"] = max(r.get("total_value", 0) for r in records)
+    save_portfolio_history(history)
+    return history
 
 
 def validate_alert_config(cfg: dict):
@@ -1445,74 +1630,108 @@ def base_allocation(s, value_regime=False, vix=None):
             'SRT.SI': 0.00, 'AJBU.SI': 0.05
         }
     if s == "EXTREME_ACCUMULATION":
+        # v1.7: 极端抄底，纯成长配置
         return {
-            'IWY': 0.75, 'WTMF': 0.00, 'LVHI': 0.00,
-            'G3B.SI': 0.10, 'MBH.SI': 0.05, 'GSD.SI': 0.05,
-            'SRT.SI': 0.03, 'AJBU.SI': 0.02
+            'IWY': 0.85, 'WTMF': 0.00, 'LVHI': 0.00,  # IWY: 0.80→0.85
+            'G3B.SI': 0.05, 'MBH.SI': 0.00, 'GSD.SI': 0.00,  # 完全取消避险资产
+            'SRT.SI': 0.05, 'AJBU.SI': 0.05  # REITs作为收益补充
         }
     if s == "CAUTIOUS_TREND":
-        growth_w = 0.10
-        value_w = 0.20
+        # v1.7: 更激进的红利配置（趋势谨慎但不放弃收益）
+        growth_w = 0.15                # 保留少量成长
+        value_w = 0.25                 # 红利为主
+        wtmf_w = 0.20                  # WTMF对冲
         if value_regime:
-            growth_w = 0.05
-            value_w = 0.25
+            growth_w = 0.08
+            value_w = 0.32             # 价值占优时更多红利
+            wtmf_w = 0.18
         return {
-            'IWY': growth_w, 'WTMF': 0.25, 'LVHI': value_w,
-            'G3B.SI': 0.10, 'MBH.SI': 0.15, 'GSD.SI': 0.10,
-            'SRT.SI': 0.03, 'AJBU.SI': 0.02
+            'IWY': growth_w, 'WTMF': wtmf_w, 'LVHI': value_w,
+            'G3B.SI': 0.08, 'MBH.SI': 0.10, 'GSD.SI': 0.08,
+            'SRT.SI': 0.05, 'AJBU.SI': 0.04
         }
     if s == "CAUTIOUS_VOL":
-        # v1.5: VIX分层配置
-        iwy_w = 0.30
-        wtmf_w = 0.30
-        mbh_w = 0.10
+        # v1.7: VIX分层配置 - 动态IWY/WTMF轮换
+        iwy_w = 0.40   # 基础值提高
+        wtmf_w = 0.20  # 基础值降低
+        lvhi_w = 0.15  # 增加红利作为波动缓冲
+        mbh_w = 0.05
         
         if vix is not None:
-            # VIX 25-30: 减少IWY，增加WTMF
-            if 25 <= vix < 30:
-                iwy_w = 0.20
-                wtmf_w = 0.35
-                mbh_w = 0.15
-            # VIX 30+: 进一步减少IWY
-            elif vix >= 30:
-                iwy_w = 0.10
-                wtmf_w = 0.40
-                mbh_w = 0.15
+            tier1 = CAUTIOUS_VOL_VIX_TIERS.get('tier1', (20, 25, 0.40, 0.20))
+            tier2 = CAUTIOUS_VOL_VIX_TIERS.get('tier2', (25, 30, 0.30, 0.30))
+            tier3 = CAUTIOUS_VOL_VIX_TIERS.get('tier3', (30, 40, 0.20, 0.40))
+            tier4 = CAUTIOUS_VOL_VIX_TIERS.get('tier4', (40, 999, 0.10, 0.50))
+            
+            if tier1[0] <= vix < tier1[1]:
+                iwy_w = tier1[2]
+                wtmf_w = tier1[3]
+                lvhi_w = 0.15
+            elif tier2[0] <= vix < tier2[1]:
+                iwy_w = tier2[2]
+                wtmf_w = tier2[3]
+                lvhi_w = 0.15
+            elif tier3[0] <= vix < tier3[1]:
+                iwy_w = tier3[2]
+                wtmf_w = tier3[3]
+                lvhi_w = 0.12  # 高波动时减少红利
+            elif vix >= tier4[0]:
+                iwy_w = tier4[2]
+                wtmf_w = tier4[3]
+                lvhi_w = 0.10
         
         return {
-            'IWY': iwy_w, 'WTMF': wtmf_w, 'LVHI': 0.10,
-            'G3B.SI': 0.05, 'MBH.SI': mbh_w, 'GSD.SI': 0.05,
-            'SRT.SI': 0.03, 'AJBU.SI': 0.02
+            'IWY': iwy_w, 'WTMF': wtmf_w, 'LVHI': lvhi_w,
+            'G3B.SI': 0.03, 'MBH.SI': mbh_w, 'GSD.SI': 0.05,
+            'SRT.SI': 0.05, 'AJBU.SI': 0.05
         }
-    # NEUTRAL
-    growth_w = 0.55
-    value_w = 0.10
+    # NEUTRAL - v1.7 最大化权益配置（无现金/无WTMF拖累）
+    growth_w = 0.68                   # 提高: 0.60→0.68 (牛市核心)
+    value_w = 0.05                    # 降低: 0.08→0.05 (作为回调缓冲)
+    wtmf_w = 0.0                      # 取消: WTMF在牛市是纯拖累
     if value_regime:
-        growth_w = 0.45
-        value_w = 0.20
+        growth_w = 0.55               # 价值占优时减少成长
+        value_w = 0.20                # 增加红利
+        wtmf_w = 0.0
     return {
-        'IWY': growth_w, 'WTMF': 0.10, 'LVHI': value_w,
-        'G3B.SI': 0.05, 'MBH.SI': 0.10, 'GSD.SI': 0.05,
-        'SRT.SI': 0.03, 'AJBU.SI': 0.02
+        'IWY': growth_w, 'WTMF': wtmf_w, 'LVHI': value_w,
+        'G3B.SI': 0.05, 'MBH.SI': 0.05, 'GSD.SI': 0.03,  # 债券/黄金降到最低
+        'SRT.SI': 0.07, 'AJBU.SI': 0.07  # REITs作为收益补充
     }
 
 
 def apply_vix_adjustments(targets, state, vix):
-    if state != "NEUTRAL" or vix is None:
+    """v1.7: VIX驱动的成长↔红利↔WTMF轮换"""
+    if vix is None:
         return
-    if vix < VIX_BOOST_LO:
-        wtmf_amt = targets.get('WTMF', 0)
-        targets['WTMF'] = 0.0
-        targets['IWY'] = targets.get('IWY', 0) + wtmf_amt
-
-        mbh_amt = targets.get('MBH.SI', 0) * 0.5
-        targets['MBH.SI'] = targets.get('MBH.SI', 0) - mbh_amt
-        targets['IWY'] = targets.get('IWY', 0) + mbh_amt
-    elif vix > VIX_CUT_HI:
-        cut_amt = 0.20
-        move_amt = min(targets.get('IWY', 0), cut_amt)
-        targets['IWY'] = targets.get('IWY', 0) - move_amt
-        targets['WTMF'] = targets.get('WTMF', 0) + move_amt
+    
+    if state == "NEUTRAL":
+        if vix < VIX_BOOST_LO:
+            # 极低VIX: 全仓成长，取消所有避险
+            wtmf_amt = targets.get('WTMF', 0)
+            mbh_amt = targets.get('MBH.SI', 0) * 0.8  # 保留20%债券
+            gsd_amt = targets.get('GSD.SI', 0) * 0.5  # 减半黄金
+            
+            total_boost = wtmf_amt + mbh_amt + gsd_amt
+            targets['WTMF'] = 0.0
+            targets['MBH.SI'] = targets.get('MBH.SI', 0) - mbh_amt
+            targets['GSD.SI'] = targets.get('GSD.SI', 0) - gsd_amt
+            targets['IWY'] = targets.get('IWY', 0) + total_boost
+            
+        elif vix > VIX_GROWTH_TO_VALUE_START:
+            # VIX>22: 开始从成长转向红利（红利更抗跌）
+            shift_ratio = min((vix - VIX_GROWTH_TO_VALUE_START) / (VIX_GROWTH_TO_VALUE_FULL - VIX_GROWTH_TO_VALUE_START), 1.0)
+            shift_amt = min(targets.get('IWY', 0), GROWTH_TO_VALUE_MAX_SHIFT * shift_ratio)
+            
+            if shift_amt > 0:
+                targets['IWY'] -= shift_amt
+                # 70%转红利，30%转WTMF
+                targets['LVHI'] = targets.get('LVHI', 0) + shift_amt * 0.7
+                targets['WTMF'] = targets.get('WTMF', 0) + shift_amt * 0.3
+    
+    elif state == "CAUTIOUS_VOL":
+        # 高波动状态：动态调整已在base_allocation中处理
+        pass
 
 
 def apply_yield_curve_guard(targets, state, yield_curve):
@@ -1739,6 +1958,84 @@ def apply_market_breadth_adjustment(targets, state, breadth_score):
             targets['WTMF'] = targets.get('WTMF', 0) + total_cut
 
 
+def apply_trend_boost(targets, state, momentum_scores, vix):
+    """
+    v1.7: 趋势驱动的成长↔WTMF动态轮换
+    强牛市: 最大化成长
+    强熊市: WTMF对冲
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or not momentum_scores or vix is None:
+        return
+    
+    iwy_score = momentum_scores.get('IWY')
+    if iwy_score is None:
+        return
+    
+    # 计算价格相对MA的偏离度 (score = (price - ma) / ma)
+    price_vs_ma = iwy_score + 1  # 转换为 price/ma 比值
+    
+    if price_vs_ma >= TREND_STRONG_BULL:
+        # 强牛市 (>10%): 最大化成长敞口
+        if vix < 18:  # 只在低波动时激进加仓
+            boost_from_wtmf = targets.get('WTMF', 0)
+            boost_from_lvhi = targets.get('LVHI', 0) * 0.3  # 从红利转30%
+            boost_from_mbh = targets.get('MBH.SI', 0) * 0.5
+            
+            total_boost = boost_from_wtmf + boost_from_lvhi + boost_from_mbh
+            targets['WTMF'] = 0.0
+            targets['LVHI'] = targets.get('LVHI', 0) - boost_from_lvhi
+            targets['MBH.SI'] = targets.get('MBH.SI', 0) - boost_from_mbh
+            targets['IWY'] = targets.get('IWY', 0) + total_boost
+            
+    elif price_vs_ma >= TREND_MILD_BULL:
+        # 温和牛市 (3-10%): 适度倾斜成长
+        boost_amt = min(targets.get('WTMF', 0), BULL_IWY_BOOST)
+        if boost_amt > 0:
+            targets['WTMF'] = targets.get('WTMF', 0) - boost_amt
+            targets['IWY'] = targets.get('IWY', 0) + boost_amt
+            
+    elif price_vs_ma < TREND_MILD_BEAR:
+        # 温和熊市 (<-3%): 增加WTMF对冲
+        # 从成长转移到WTMF和红利
+        shift_amt = min(targets.get('IWY', 0), BEAR_WTMF_BOOST * 0.6)
+        if shift_amt > 0:
+            targets['IWY'] -= shift_amt
+            targets['WTMF'] = targets.get('WTMF', 0) + shift_amt * 0.7
+            targets['LVHI'] = targets.get('LVHI', 0) + shift_amt * 0.3  # 红利更抗跌
+
+
+def apply_value_rotation(targets, state, momentum_scores):
+    """
+    v1.7 新增: 红利相对强弱轮换
+    当红利相对成长跑赢时，增配红利；反之增配成长
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or not momentum_scores:
+        return
+    
+    iwy_score = momentum_scores.get('IWY')
+    lvhi_score = momentum_scores.get('LVHI')
+    
+    if iwy_score is None or lvhi_score is None:
+        return
+    
+    # 计算相对强弱 (LVHI相对IWY的超额收益)
+    relative_strength = lvhi_score - iwy_score
+    
+    if relative_strength > VALUE_OUTPERFORM_THRESHOLD:
+        # 红利跑赢: 从成长转向红利
+        shift_amt = min(targets.get('IWY', 0) * 0.3, VALUE_ROTATION_AMOUNT)
+        if shift_amt > 0:
+            targets['IWY'] -= shift_amt
+            targets['LVHI'] = targets.get('LVHI', 0) + shift_amt
+            
+    elif relative_strength < VALUE_UNDERPERFORM_THRESHOLD:
+        # 成长跑赢: 从红利转向成长
+        shift_amt = min(targets.get('LVHI', 0) * 0.5, VALUE_ROTATION_AMOUNT)
+        if shift_amt > 0:
+            targets['LVHI'] -= shift_amt
+            targets['IWY'] = targets.get('IWY', 0) + shift_amt
+
+
 def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None,
                            sahm=None, corr=None, momentum_scores=None, yc_recently_inverted=False, vix_recent_peak=None,
                            dual_ma_signals=None, breadth_score=None):
@@ -1777,14 +2074,25 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     
     # v1.5: 新增优化
     apply_market_breadth_adjustment(targets, s, breadth_score)
-    apply_cash_buffer(targets, s, vix)  # 现金缓冲最后执行
+    
+    # v1.7: 动态轮换（核心收益增强）
+    apply_trend_boost(targets, s, momentum_scores, vix)
+    apply_value_rotation(targets, s, momentum_scores)
+    
+    # 现金缓冲已禁用（v1.7）
 
     return targets
 
 
-def generate_execution_tips(metrics, change_info, current_holdings=None, targets=None):
+def generate_execution_tips(metrics, change_info, current_holdings=None, targets=None, total_value=None):
     """
     生成执行建议提示，帮助用户在实际操作时参考回测中的优化机制。
+    
+    改进点:
+    1. 信号确认: 明确显示"待确认"状态，建议观望
+    2. 波动率: 基于收盘数据（已确定），给出明确执行比例
+    3. 止损: 基于用户实际持仓计算回撤，给出具体操作
+    4. 可执行性: 给出具体的资产和金额建议
     """
     tips = []
     
@@ -1793,99 +2101,185 @@ def generate_execution_tips(metrics, change_info, current_holdings=None, targets
     days_in_state = change_info.get('days_in_state') if change_info else None
     prev_state = change_info.get('prev_state') if change_info else None
     
-    # 1. 信号确认提示
+    # === 0. 止损状态检查（最高优先级）===
+    if total_value and total_value > 0:
+        stop_loss_status = get_stop_loss_status(total_value)
+        if stop_loss_status.get('in_stop_loss'):
+            drawdown = stop_loss_status['drawdown_pct']
+            recovery_ratio = stop_loss_status['recovery_ratio']
+            reduce_pct = (1 - recovery_ratio) * 100
+            tips.append({
+                'type': 'error',
+                'icon': '🚨',
+                'title': f'止损触发 (回撤 {drawdown*100:.1f}%)',
+                'content': f'当前组合回撤已超过{abs(DRAWDOWN_STOP_LOSS)*100:.0f}%止损线！'
+                           f'建议立即将风险资产（IWY, G3B.SI等）减仓至目标的{recovery_ratio*100:.0f}%，'
+                           f'释放的资金转入WTMF或现金。回撤恢复至{abs(DRAWDOWN_RECOVERY_THRESHOLD)*100:.0f}%内后再逐步恢复。'
+            })
+        elif stop_loss_status['drawdown_pct'] < -0.05:  # 接近止损线
+            drawdown = stop_loss_status['drawdown_pct']
+            tips.append({
+                'type': 'warning',
+                'icon': '⚠️',
+                'title': f'接近止损线 (回撤 {drawdown*100:.1f}%)',
+                'content': f'当前组合回撤{drawdown*100:.1f}%，距离止损线({abs(DRAWDOWN_STOP_LOSS)*100:.0f}%)较近。'
+                           f'建议降低风险敞口，或设置盘中价格提醒，若继续下跌{(DRAWDOWN_STOP_LOSS - drawdown)*100:.1f}%即触发止损。'
+            })
+    
+    # === 1. 信号确认提示（重要提醒）===
     if days_in_state is not None and days_in_state <= SIGNAL_CONFIRM_DAYS:
+        remaining_days = SIGNAL_CONFIRM_DAYS - days_in_state + 1
         if prev_state and prev_state != state:
             tips.append({
                 'type': 'warning',
                 'icon': '🔄',
-                'title': '状态确认中',
-                'content': f'状态刚从 {prev_state} 切换到 {state}，仅持续 {days_in_state} 天。建议观望 {SIGNAL_CONFIRM_DAYS - days_in_state + 1} 天确认后再大幅调仓。'
+                'title': f'状态待确认 ({days_in_state}/{SIGNAL_CONFIRM_DAYS}天)',
+                'content': f'状态刚从 {prev_state} 切换到 {state}，需连续{SIGNAL_CONFIRM_DAYS}天确认。'
+                           f'【建议】暂不执行大幅调仓，等待{remaining_days}天确认后再行动。'
+                           f'若急需操作，可先执行目标配置的50%。'
             })
+        else:
+            tips.append({
+                'type': 'info',
+                'icon': '🔄',
+                'title': f'信号确认中 ({days_in_state}/{SIGNAL_CONFIRM_DAYS}天)',
+                'content': f'当前状态 {state} 持续{days_in_state}天，还需{remaining_days}天确认。可按目标的50-70%先行配置。'
+            })
+    elif days_in_state is not None and days_in_state > SIGNAL_CONFIRM_DAYS:
+        tips.append({
+            'type': 'success',
+            'icon': '✅',
+            'title': f'信号已确认 (持续{days_in_state}天)',
+            'content': f'状态 {state} 已确认，可按目标配置全额执行。'
+        })
     
-    # 2. 波动率提示
+    # === 2. 波动率执行建议（基于收盘VIX，已确定）===
     if vix is not None:
         if vix > VIX_SMOOTH_END:
             reduction_pct = int(VIX_MAX_REDUCTION * 100)
+            exec_pct = 100 - reduction_pct
             tips.append({
                 'type': 'error',
                 'icon': '📊',
-                'title': '高波动率警告',
-                'content': f'VIX={vix:.1f} 处于高位，建议按目标配置的 {100-reduction_pct}% 执行，剩余资金持有现金或 WTMF。'
+                'title': f'高波动警告 (VIX={vix:.1f})',
+                'content': f'VIX超过{VIX_SMOOTH_END:.0f}，市场波动剧烈。'
+                           f'【执行】按目标配置的{exec_pct}%建仓，{reduction_pct}%留作现金/WTMF。'
+                           f'例如目标IWY 55%，实际执行IWY {55*exec_pct/100:.0f}%。'
             })
         elif vix > VIX_SMOOTH_START:
-            # 线性计算减仓比例
             reduction = (vix - VIX_SMOOTH_START) / (VIX_SMOOTH_END - VIX_SMOOTH_START) * VIX_MAX_REDUCTION
             exec_pct = int((1 - reduction) * 100)
             tips.append({
                 'type': 'warning',
                 'icon': '📊',
-                'title': '波动率偏高',
-                'content': f'VIX={vix:.1f}，波动率偏高。可考虑按目标配置的 {exec_pct}% 执行，留 {100-exec_pct}% 现金缓冲。'
+                'title': f'波动偏高 (VIX={vix:.1f})',
+                'content': f'VIX处于{VIX_SMOOTH_START:.0f}-{VIX_SMOOTH_END:.0f}区间，建议保守执行。'
+                           f'【执行】按目标配置的{exec_pct}%建仓，留{100-exec_pct}%现金缓冲。'
             })
-    
-    # 3. 状态过渡执行建议
-    if targets and current_holdings:
-        total_change = 0
-        for ticker, target_w in targets.items():
-            current_w = current_holdings.get(ticker, 0)
-            if isinstance(current_w, (int, float)):
-                total_change += abs(target_w - current_w)
-        
-        if total_change > 0.20:  # 配置变化超过20%
+        elif vix < VIX_BOOST_LO:
             tips.append({
-                'type': 'info',
-                'icon': '🔀',
-                'title': '建议分步过渡',
-                'content': f'目标配置变化较大（约 {total_change*100:.0f}%），建议分 {STATE_TRANSITION_DAYS} 天逐步调整，避免一次性大幅换仓。'
+                'type': 'success',
+                'icon': '🚀',
+                'title': f'低波动机会 (VIX={vix:.1f})',
+                'content': f'VIX<{VIX_BOOST_LO:.0f}，市场极度平稳。可全额执行目标配置，甚至考虑减少WTMF/债券，增加权益。'
             })
     
-    # 4. 再平衡容忍带提示
-    if targets and current_holdings:
-        max_deviation = 0
+    # === 3. 具体调仓建议 ===
+    if targets and current_holdings and total_value and total_value > 0:
+        # 计算各资产偏离
+        deviations = []
         for ticker, target_w in targets.items():
-            current_w = current_holdings.get(ticker, 0)
-            if isinstance(current_w, (int, float)):
-                deviation = abs(target_w - current_w)
-                max_deviation = max(max_deviation, deviation)
+            current_val = current_holdings.get(ticker, 0)
+            current_w = current_val / total_value if isinstance(current_val, (int, float)) else 0
+            deviation = target_w - current_w
+            diff_val = deviation * total_value
+            if abs(deviation) > 0.02:  # 超过2%才显示
+                deviations.append({
+                    'ticker': ticker,
+                    'name': ASSET_NAMES.get(ticker, ticker),
+                    'deviation': deviation,
+                    'diff_val': diff_val,
+                    'action': '买入' if deviation > 0 else '卖出'
+                })
+        
+        # 检查需要清仓的资产
+        for ticker, current_val in current_holdings.items():
+            if ticker not in targets and isinstance(current_val, (int, float)) and current_val > 100:
+                deviations.append({
+                    'ticker': ticker,
+                    'name': ASSET_NAMES.get(ticker, ticker),
+                    'deviation': -current_val / total_value,
+                    'diff_val': -current_val,
+                    'action': '清仓'
+                })
+        
+        # 按偏离大小排序
+        deviations.sort(key=lambda x: abs(x['deviation']), reverse=True)
+        
+        total_change = sum(abs(d['deviation']) for d in deviations) / 2  # 单边换手
+        max_deviation = max(abs(d['deviation']) for d in deviations) if deviations else 0
         
         if max_deviation < REBALANCE_THRESHOLD:
             tips.append({
                 'type': 'success',
                 'icon': '📏',
                 'title': '无需调仓',
-                'content': f'当前持仓与目标偏离 < {REBALANCE_THRESHOLD*100:.0f}%，可暂不调仓以节省交易成本。'
+                'content': f'所有资产偏离均<{REBALANCE_THRESHOLD*100:.0f}%，可暂不调仓以节省交易成本（预估0.1-0.3%）。'
+            })
+        elif total_change > 0.20:
+            # 大幅调仓，建议分步
+            top_actions = deviations[:3]
+            action_text = "; ".join([
+                f"{d['action']}{d['name'][:6]}约${abs(d['diff_val']):,.0f}" for d in top_actions
+            ])
+            tips.append({
+                'type': 'info',
+                'icon': '🔀',
+                'title': f'分步调仓 (换手{total_change*100:.0f}%)',
+                'content': f'调仓幅度较大，建议分{STATE_TRANSITION_DAYS}天执行。'
+                           f'【今日操作】{action_text}。每天调整约{total_change/STATE_TRANSITION_DAYS*100:.0f}%。'
+            })
+        elif deviations:
+            top_actions = deviations[:2]
+            action_text = "; ".join([
+                f"{d['action']}{d['name'][:6]}约${abs(d['diff_val']):,.0f}" for d in top_actions
+            ])
+            tips.append({
+                'type': 'info',
+                'icon': '📋',
+                'title': '调仓建议',
+                'content': f'【操作】{action_text}。'
             })
     
-    # 5. 极端抄底状态提示
+    # === 4. 极端状态提示 ===
     if state == "EXTREME_ACCUMULATION":
         tips.append({
             'type': 'warning',
             'icon': '⚡',
-            'title': '抄底状态注意',
-            'content': '当前为极端抄底状态，建议分批建仓：首次40% → 反弹确认后60% → 趋势确立后75%。'
+            'title': '抄底状态',
+            'content': '极端抄底模式，风险与机会并存。【执行】分批建仓：首次40% → 反弹5%后加至60% → 突破MA50后加至75%。'
+        })
+    elif state in ["DEFLATION_RECESSION", "INFLATION_SHOCK"]:
+        tips.append({
+            'type': 'error',
+            'icon': '🛡️',
+            'title': '危机防御模式',
+            'content': '当前为危机状态，优先保本。严格执行目标配置，避免抄底冲动。WTMF和黄金是主要避险工具。'
         })
     
-    # 6. 止损提醒
-    tips.append({
-        'type': 'info',
-        'icon': '🛡️',
-        'title': '止损建议',
-        'content': f'如持仓回撤超过 {abs(DRAWDOWN_STOP_LOSS)*100:.0f}%，建议风险资产减仓 {DRAWDOWN_REDUCE_RATIO*100:.0f}%，回撤恢复到 {abs(DRAWDOWN_RECOVERY_THRESHOLD)*100:.0f}% 内再恢复。'
-    })
-    
-    # 7. Sahm Rule 预警提示
+    # === 5. Sahm Rule 预警提示 ===
     sahm = metrics.get('sahm')
     if sahm is not None and SAHM_EARLY_WARNING_LO <= sahm < SAHM_EARLY_WARNING_HI:
         reduction_pct = int((sahm - SAHM_EARLY_WARNING_LO) / (SAHM_EARLY_WARNING_HI - SAHM_EARLY_WARNING_LO) * SAHM_REDUCTION_RATE * 100)
         tips.append({
             'type': 'warning',
             'icon': '📉',
-            'title': 'Sahm Rule 预警',
-            'content': f'Sahm={sahm:.2f} 处于预警区间 ({SAHM_EARLY_WARNING_LO}-{SAHM_EARLY_WARNING_HI})，建议IWY减仓约 {reduction_pct}%。'
+            'title': f'Sahm预警 ({sahm:.2f})',
+            'content': f'Sahm Rule处于预警区间({SAHM_EARLY_WARNING_LO}-{SAHM_EARLY_WARNING_HI})。'
+                       f'【影响】IWY目标已自动减少{reduction_pct}%，转入WTMF。'
         })
     
-    # 8. 收益率曲线解倒挂提示
+    # === 6. 收益率曲线解倒挂提示 ===
     yc_un_invert = metrics.get('yc_un_invert', False)
     yield_curve = metrics.get('yield_curve')
     if yc_un_invert and yield_curve is not None and yield_curve > 0:
@@ -1893,18 +2287,34 @@ def generate_execution_tips(metrics, change_info, current_holdings=None, targets
             'type': 'warning',
             'icon': '📈',
             'title': '解倒挂保护期',
-            'content': f'收益率曲线已转正({yield_curve:.2f}%)，但近期曾深度倒挂。历史上解倒挂后9-18个月易发生衰退，建议维持防御配置。'
+            'content': f'收益率曲线已转正({yield_curve:.2f}%)，但近期曾深度倒挂。'
+                       f'【历史规律】解倒挂后6-18个月易发生衰退。'
+                       f'【影响】IWY目标已减少{int(YC_UNINVERT_REDUCTION*100)}%，维持防御配置。'
         })
     
-    # 9. 相关性警告
+    # === 7. 相关性警告 ===
     corr = metrics.get('corr')
     if corr is not None and corr > CORR_HIGH_THRESHOLD:
         tips.append({
             'type': 'info',
             'icon': '🔗',
-            'title': '股债相关性偏高',
-            'content': f'当前股债相关性={corr:.2f} > {CORR_HIGH_THRESHOLD}，债券对冲效果减弱，已自动增配 WTMF。'
+            'title': f'相关性偏高 ({corr:.2f})',
+            'content': f'股债相关性>{CORR_HIGH_THRESHOLD}，债券对冲效果减弱。'
+                       f'【影响】MBH.SI目标已转移{int(CORR_MAX_REALLOC*100)}%至WTMF/黄金。'
         })
+    
+    # === 8. 跨市场执行提醒 ===
+    if targets:
+        sg_assets = [t for t in targets.keys() if '.SI' in t and targets[t] > 0.02]
+        us_assets = [t for t in targets.keys() if '.SI' not in t and t != 'OTHERS' and targets[t] > 0.02]
+        if sg_assets and us_assets:
+            tips.append({
+                'type': 'info',
+                'icon': '🌏',
+                'title': '跨市场执行',
+                'content': f'涉及新加坡({", ".join(sg_assets[:3])})和美股({", ".join(us_assets[:3])})。'
+                           f'【时区】SGX 9:00-17:00(+8), NYSE 21:30-04:00(+8)。建议先执行SGX，次日再执行US。'
+            })
     
     return tips
 
@@ -2496,6 +2906,99 @@ def render_enhanced_diagnosis(metrics, current_holdings, total_value, targets, c
             delta_color="inverse" if max_dev > REBALANCE_THRESHOLD else "normal"
         )
     
+    # === 新增：止损状态面板 ===
+    if total_value > 0:
+        st.markdown("---")
+        st.markdown("### 🛡️ 止损状态监控")
+        
+        stop_loss_status = get_stop_loss_status(total_value)
+        drawdown_pct = stop_loss_status['drawdown_pct']
+        peak_value = stop_loss_status['peak_value']
+        days_since_peak = stop_loss_status['days_since_peak']
+        in_stop_loss = stop_loss_status['in_stop_loss']
+        recovery_ratio = stop_loss_status['recovery_ratio']
+        
+        col_sl1, col_sl2, col_sl3, col_sl4 = st.columns(4)
+        
+        with col_sl1:
+            if drawdown_pct < DRAWDOWN_STOP_LOSS:
+                dd_color = "inverse"
+            elif drawdown_pct < DRAWDOWN_RECOVERY_THRESHOLD:
+                dd_color = "off"
+            else:
+                dd_color = "normal"
+            st.metric(
+                "📉 当前回撤",
+                f"{drawdown_pct*100:.1f}%",
+                f"止损线: {DRAWDOWN_STOP_LOSS*100:.0f}%",
+                delta_color=dd_color
+            )
+        
+        with col_sl2:
+            st.metric(
+                "📈 历史最高",
+                f"${peak_value:,.0f}",
+                f"当前: ${total_value:,.0f}"
+            )
+        
+        with col_sl3:
+            st.metric(
+                "📅 距峰值",
+                f"{days_since_peak} 天",
+                "持续时间"
+            )
+        
+        with col_sl4:
+            stage = stop_loss_status.get('stage', '正常')
+            stage_color = stop_loss_status.get('stage_color', '#52c41a')
+            if in_stop_loss:
+                st.metric(
+                    "🚨 止损阶段",
+                    f"减仓至{recovery_ratio*100:.0f}%",
+                    stage,
+                    delta_color="inverse"
+                )
+            else:
+                st.metric(
+                    "✅ 止损状态",
+                    stage,
+                    stop_loss_status.get('advice', ''),
+                    delta_color="normal" if stage == "正常" else "off"
+                )
+        
+        # 止损操作建议
+        if in_stop_loss:
+            st.error(f"""
+            **⚠️ 止损触发！** 当前回撤 {drawdown_pct*100:.1f}% 已超过止损线 {DRAWDOWN_STOP_LOSS*100:.0f}%。
+            
+            **建议操作：**
+            - 将风险资产（IWY, G3B.SI, LVHI等）减仓至目标的 **{recovery_ratio*100:.0f}%**
+            - 释放资金转入 WTMF 或 现金
+            - 回撤恢复至 **{DRAWDOWN_RECOVERY_THRESHOLD*100:.0f}%** 内后再逐步恢复仓位
+            """)
+        elif drawdown_pct < -0.05:
+            st.warning(f"""
+            **⚠️ 接近止损线！** 当前回撤 {drawdown_pct*100:.1f}%，距止损线 {DRAWDOWN_STOP_LOSS*100:.0f}% 仅差 {(DRAWDOWN_STOP_LOSS - drawdown_pct)*100:.1f}%。
+            
+            建议：降低风险敞口或设置盘中价格提醒。
+            """)
+        
+        # 重置峰值按钮（用于注入新资金后）
+        with st.expander("⚙️ 止损设置", expanded=False):
+            st.caption("如果您新注入资金，可重置历史最高净值以避免误触止损。")
+            col_reset1, col_reset2 = st.columns(2)
+            with col_reset1:
+                if st.button("🔄 重置为当前净值", help="将历史最高净值重置为当前总市值"):
+                    reset_portfolio_peak(total_value)
+                    st.success(f"已重置历史最高净值为 ${total_value:,.0f}")
+                    st.rerun()
+            with col_reset2:
+                new_peak = st.number_input("手动设置峰值", value=float(peak_value), step=1000.0, key="manual_peak")
+                if st.button("确认设置"):
+                    reset_portfolio_peak(new_peak)
+                    st.success(f"已设置历史最高净值为 ${new_peak:,.0f}")
+                    st.rerun()
+    
     st.markdown("---")
     
     # 1. 健康度评估
@@ -2662,11 +3165,16 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
 
     return results
 
-def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0, ma_window=200, use_proxies=False, rebal_freq='Daily'):
+def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.0, ma_window=200, use_proxies=False, rebal_freq='Daily', transaction_cost_bps=10):
     """
     Simulates the strategy over historical states.
     df_states: DataFrame with 'State', 'Gold_Bear', 'Value_Regime' columns, indexed by Date.
     rebal_freq: 'Daily', 'Weekly', 'Monthly', 'Quarterly'
+    transaction_cost_bps: 交易成本（基点），默认10bps=0.1%，包含佣金+滑点
+    
+    关键改进（v1.6）：
+    - 使用T-1日信号决定T日配置，避免前视偏差
+    - 计入交易成本
     """
     ensure_fred_cached()
     # 1. Define Asset Universe
@@ -2801,14 +3309,38 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
 
     prev_date = None
     
+    # === 关键修复：使用T-1日信号决定T日配置（避免前视偏差）===
+    # 预存前一天的状态信息用于当天决策
+    prev_row_state = None  # T-1日的状态
+    prev_row_gb = None     # T-1日的Gold_Bear
+    prev_row_vr = None     # T-1日的Value_Regime
+    prev_row_date = None   # T-1日的日期
+    
     for date, row in df_states.iterrows():
-        # Get raw state from data
-        raw_state = row['State']
-        gb = row['Gold_Bear']
-        vr = row['Value_Regime']
+        # ===【重要】使用T-1日的状态来决定T日配置 ===
+        # 这模拟了真实交易：T-1收盘后看到数据，T日开盘执行
+        if prev_row_state is None:
+            # 第一天：无前一天数据，使用当天（这是不可避免的）
+            raw_state = row['State']
+            gb = row['Gold_Bear']
+            vr = row['Value_Regime']
+            decision_date = date  # 用于获取趋势等辅助信息
+        else:
+            # 使用T-1日的状态信息做T日决策
+            raw_state = prev_row_state
+            gb = prev_row_gb
+            vr = prev_row_vr
+            decision_date = prev_row_date  # 使用T-1日的趋势信息
+        
+        # 保存当天状态供下一天使用
+        prev_row_state = row['State']
+        prev_row_gb = row['Gold_Bear']
+        prev_row_vr = row['Value_Regime']
+        prev_row_date = date
         
         # === 优化1: 信号确认延迟机制 ===
         # 状态切换需连续 SIGNAL_CONFIRM_DAYS 天确认才生效
+        # v1.6: EXTREME_ACCUMULATION使用更快确认（抄底机会稍纵即逝）
         if confirmed_state is None:
             # 首日直接确认
             confirmed_state = raw_state
@@ -2816,10 +3348,13 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             pending_state_days = 0
         elif raw_state != confirmed_state:
             # 检测到状态变化
+            # v1.6: 根据目标状态选择确认天数
+            required_confirm_days = EXTREME_CONFIRM_DAYS if raw_state == "EXTREME_ACCUMULATION" else SIGNAL_CONFIRM_DAYS
+            
             if pending_state == raw_state:
                 # 继续确认同一个待切换状态
                 pending_state_days += 1
-                if pending_state_days >= SIGNAL_CONFIRM_DAYS:
+                if pending_state_days >= required_confirm_days:
                     # 确认切换！启动过渡
                     confirmed_state = raw_state
                     pending_state = None
@@ -2843,46 +3378,58 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         # Check if this is a rebalancing day
         should_rebalance = is_rebalance_day(date, rebal_freq, prev_date)
         
-        # Get trends for this date
+        # Get trends for this date - 使用decision_date（T-1日）来获取趋势信息
+        # 这确保决策基于前一天的信息
         daily_trends = {}
+        trend_lookup_date = decision_date if decision_date in trend_bear_all.index else date
         
         if use_proxies:
             proxy_trend_bear = False
-            if '^GSPC' in trend_bear_all.columns:
-                proxy_trend_bear = trend_bear_all.loc[date]['^GSPC']
+            if '^GSPC' in trend_bear_all.columns and trend_lookup_date in trend_bear_all.index:
+                proxy_trend_bear = trend_bear_all.loc[trend_lookup_date]['^GSPC']
             
             for t in ['IWY', 'G3B.SI', 'LVHI', 'SRT.SI', 'AJBU.SI']:
                 daily_trends[t] = proxy_trend_bear
                 
             gold_proxy = 'GLD'
-            if date < pd.Timestamp('2004-11-18') and 'GC=F' in trend_bear_all.columns:
+            if trend_lookup_date < pd.Timestamp('2004-11-18') and 'GC=F' in trend_bear_all.columns:
                  gold_proxy = 'GC=F'
             
-            if gold_proxy in trend_bear_all.columns:
-                daily_trends['GSD.SI'] = trend_bear_all.loc[date][gold_proxy]
+            if gold_proxy in trend_bear_all.columns and trend_lookup_date in trend_bear_all.index:
+                daily_trends['GSD.SI'] = trend_bear_all.loc[trend_lookup_date][gold_proxy]
 
             bond_proxy = 'TLT'
             if 'VUSTX' in trend_bear_all.columns:
                 bond_proxy = 'VUSTX'
             
-            if bond_proxy in trend_bear_all.columns:
-                daily_trends['MBH.SI'] = trend_bear_all.loc[date][bond_proxy]
+            if bond_proxy in trend_bear_all.columns and trend_lookup_date in trend_bear_all.index:
+                daily_trends['MBH.SI'] = trend_bear_all.loc[trend_lookup_date][bond_proxy]
         else:
-            if date in trend_bear_all.index:
-                daily_trends = trend_bear_all.loc[date].to_dict()
+            if trend_lookup_date in trend_bear_all.index:
+                daily_trends = trend_bear_all.loc[trend_lookup_date].to_dict()
         
-        vix_val = row.get('VIX')
-        yc_val = row.get('YieldCurve')
-        sahm_val = row.get('Sahm')
-        corr_val = row.get('Corr')
+        # === 使用T-1日的指标数据做决策 ===
+        # 从df_states中获取decision_date对应的指标（如果可用）
+        if decision_date in df_states.index:
+            decision_row = df_states.loc[decision_date]
+            vix_val = decision_row.get('VIX')
+            yc_val = decision_row.get('YieldCurve')
+            sahm_val = decision_row.get('Sahm')
+            corr_val = decision_row.get('Corr')
+        else:
+            vix_val = row.get('VIX')
+            yc_val = row.get('YieldCurve')
+            sahm_val = row.get('Sahm')
+            corr_val = row.get('Corr')
         
-        # 计算动量强度分数 (price - ma) / ma
+        # 计算动量强度分数 (price - ma) / ma - 使用T-1日数据
         momentum_scores = {}
-        if date in price_data.index and date in ma_all.index:
+        momentum_date = decision_date if decision_date in price_data.index else date
+        if momentum_date in price_data.index and momentum_date in ma_all.index:
             for ticker in price_data.columns:
                 try:
-                    p = price_data.loc[date, ticker]
-                    m = ma_all.loc[date, ticker]
+                    p = price_data.loc[momentum_date, ticker]
+                    m = ma_all.loc[momentum_date, ticker]
                     if pd.notna(p) and pd.notna(m) and m > 0:
                         momentum_scores[ticker] = (p - m) / m
                 except:
@@ -2891,19 +3438,19 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             if use_proxies and '^GSPC' in momentum_scores:
                 momentum_scores['IWY'] = momentum_scores['^GSPC']
         
-        # 检查近期VIX峰值（用于均值回归加仓）
+        # 检查近期VIX峰值（用于均值回归加仓）- 基于decision_date
         vix_recent_peak = None
-        if 'VIX' in df_states.columns:
-            lookback_start = max(0, df_states.index.get_loc(date) - 60)
-            vix_history = df_states['VIX'].iloc[lookback_start:df_states.index.get_loc(date)+1]
+        if 'VIX' in df_states.columns and decision_date in df_states.index:
+            lookback_start = max(0, df_states.index.get_loc(decision_date) - 60)
+            vix_history = df_states['VIX'].iloc[lookback_start:df_states.index.get_loc(decision_date)+1]
             if len(vix_history) > 0:
                 vix_recent_peak = vix_history.max()
         
-        # 检查近12个月是否曾深度倒挂
+        # 检查近12个月是否曾深度倒挂 - 基于decision_date
         yc_recently_inverted = False
-        if 'YieldCurve' in df_states.columns:
-            lookback_start = max(0, df_states.index.get_loc(date) - 252)
-            yc_history = df_states['YieldCurve'].iloc[lookback_start:df_states.index.get_loc(date)+1]
+        if 'YieldCurve' in df_states.columns and decision_date in df_states.index:
+            lookback_start = max(0, df_states.index.get_loc(decision_date) - 252)
+            yc_history = df_states['YieldCurve'].iloc[lookback_start:df_states.index.get_loc(decision_date)+1]
             if len(yc_history) > 0:
                 yc_recently_inverted = (yc_history.min() < -0.20)
         
@@ -2997,10 +3544,13 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         else:
             final_weights = drifted_weights if drifted_weights else new_target_weights
         
-        # === 优化2: 波动率目标机制 ===
+        # === 优化2: 波动率目标机制 (使用T-1数据，避免前视偏差) ===
         # 根据实现波动率调整仓位
-        if len(portfolio_returns_history) >= VOL_LOOKBACK:
-            realized_vol = np.std(portfolio_returns_history[-VOL_LOOKBACK:]) * np.sqrt(252)
+        # 关键修复：使用portfolio_returns_history[:-1]，即不包含当天的收益（当天收益尚未发生）
+        # 这样确保在t日做决策时，只使用t-1及之前的信息
+        vol_history_for_calc = portfolio_returns_history[:-1] if len(portfolio_returns_history) > 1 else []
+        if len(vol_history_for_calc) >= VOL_LOOKBACK:
+            realized_vol = np.std(vol_history_for_calc[-VOL_LOOKBACK:]) * np.sqrt(252)
             if realized_vol > 0:
                 vol_scalar = TARGET_VOL / realized_vol
                 vol_scalar = max(VOL_SCALAR_MIN, min(vol_scalar, VOL_SCALAR_MAX))
@@ -3073,6 +3623,11 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             diff_sum += abs(curr_cash_w - prev_cash_w)
             
             daily_turnover = diff_sum / 2.0
+        
+        # === 交易成本扣减 ===
+        # transaction_cost_bps 是基点，1bps = 0.01% = 0.0001
+        # 交易成本 = 换手率 * 成本率
+        trading_cost = daily_turnover * (transaction_cost_bps / 10000.0)
             
         # Record history (with enhanced info)
         rec = targets.copy()
@@ -3080,6 +3635,7 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
         rec['State'] = s
         rec['RawState'] = raw_state  # 原始未确认状态
         rec['Turnover'] = daily_turnover
+        rec['TradingCost'] = trading_cost  # 新增：记录交易成本
         rec['Rebalanced'] = should_actually_rebalance
         rec['InStopLoss'] = in_stop_loss_mode
         rec['Drawdown'] = current_drawdown
@@ -3095,6 +3651,9 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             for t, w in final_weights.items():
                 if t in current_rets:
                     daily_ret += w * current_rets[t]
+        
+        # === 扣除交易成本 ===
+        daily_ret -= trading_cost
         
         # 记录收益用于波动率计算
         portfolio_returns_history.append(daily_ret)
@@ -4100,7 +4659,7 @@ def render_historical_backtest_section():
         with st.spinner("回测中..."):
             df_states, err = get_historical_macro_data(dates[0], dates[1], ma_window=int(ma_window), params=custom_params, use_proxies=use_proxies)
             if not df_states.empty:
-                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies, rebal_freq=rebal_freq)
+                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies, rebal_freq=rebal_freq, transaction_cost_bps=cost_bps)
                 if res is not None:
                     # Metrics & Charts (Simplified for brevity as logic exists in run_dynamic_backtest return)
                     st.success("回测完成")
@@ -4836,6 +5395,10 @@ def render_state_machine_check():
                 if cfg.get("vix_alert_enabled") and metrics.get('vix') is not None and metrics['vix'] >= cfg.get('vix_alert_threshold', 35):
                     st.error(f"VIX 达到 {metrics['vix']:.1f}，超过阈值 {cfg.get('vix_alert_threshold', 35)}。")
 
+                # 记录持仓快照（用于回撤计算）
+                if total_value > 0:
+                    record_portfolio_snapshot(total_value, current_holdings, metrics['state'])
+
                 # Render Results
                 render_data_health_badges(metrics)
                 render_status_card(metrics['state'])
@@ -4887,7 +5450,8 @@ def render_state_machine_check():
                     metrics, 
                     change_info, 
                     current_holdings=current_holdings,
-                    targets=targets
+                    targets=targets,
+                    total_value=total_value
                 )
                 render_execution_tips(execution_tips)
 

@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "date": "2026-01-23",
+      "ts": "2026-01-23T15:19:53",
+      "total_value": 10000.0,
+      "holdings": {
+        "IWY": 5699.999999999999,
+        "WTMF": 1000.0,
+        "LVHI": 1000.0,
+        "G3B.SI": 500.0,
+        "MBH.SI": 1000.0,
+        "GSD.SI": 500.0,
+        "SRT.SI": 300.0,
+        "AJBU.SI": 0.0,
+        "OTHERS": 0.0
+      },
+      "state": "NEUTRAL"
+    }
+  ],
+  "peak_value": 10000.0,
+  "cost_basis": 0
+}
