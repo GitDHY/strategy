@@ -1,0 +1,50 @@
+{
+    "趋势跟踪1": {
+        "name": "趋势跟踪1",
+        "code": "\"\"\"\n趋势跟踪策略 (Trend Following)\n只持有处于上升趋势的资产（价格在均线上方）。\n\"\"\"\n\ndef strategy():\n    weights = ctx.get_current_weights()\n    \n    # 策略参数\n    ma_period = 200     # 长期均线\n    trend_ma = 50       # 趋势确认均线\n    \n    total_weight = 100\n    trending_assets = []\n    \n    # 识别趋势资产\n    for ticker in ctx.tickers:\n        if ctx.price_above_ma(ticker, ma_period):\n            trending_assets.append(ticker)\n    \n    ctx.log(f\"📊 趋势向上的资产: {trending_assets}\")\n    \n    if not trending_assets:\n        # 没有趋势资产，保守配置\n        ctx.log(\"⚠️ 无趋势资产，保持现有配置\")\n        return\n    \n    # 平均分配权重给趋势资产\n    weight_per_asset = total_weight / len(trending_assets)\n    \n    for ticker in ctx.tickers:\n        if ticker in trending_assets:\n            # 趋势资产: 分配权重\n            old_weight = weights.get(ticker, 0)\n            weights[ticker] = weight_per_asset\n            if weights[ticker] > old_weight:\n                ctx.log(f\"🟢 {ticker} 趋势向上，增仓至 {weight_per_asset:.1f}%\")\n        else:\n            # 非趋势资产: 清仓\n            if weights.get(ticker, 0) > 0:\n                ctx.log(f\"🔴 {ticker} 趋势转弱，清仓\")\n            weights[ticker] = 0\n    \n    ctx.set_target_weights(weights)\n",
+        "description": "",
+        "portfolio_name": "Current",
+        "created_at": "2026-02-06T17:05:25.837587",
+        "updated_at": "2026-02-06T17:05:25.837592"
+    },
+    "风险平价1": {
+        "name": "风险平价1",
+        "code": "\"\"\"\n风险平价策略 (Simplified Risk Parity)\n根据波动率反比调整仓位，低波动资产配置更多。\n\"\"\"\n\ndef strategy():\n    weights = ctx.get_current_weights()\n    \n    # 策略参数\n    vol_period = 20     # 波动率计算周期\n    target_vol = 0.15   # 目标波动率 15%\n    \n    volatilities = {}\n    \n    # 计算各资产波动率\n    for ticker in ctx.tickers:\n        vol = ctx.volatility(ticker, vol_period, annualize=True)\n        if not vol.empty and vol.iloc[-1] > 0:\n            volatilities[ticker] = vol.iloc[-1]\n    \n    if not volatilities:\n        ctx.log(\"⚠️ 无法计算波动率\")\n        return\n    \n    # 计算反波动率权重\n    inv_vol = {t: 1/v for t, v in volatilities.items()}\n    total_inv_vol = sum(inv_vol.values())\n    \n    # 归一化权重\n    for ticker in ctx.tickers:\n        if ticker in inv_vol:\n            weights[ticker] = (inv_vol[ticker] / total_inv_vol) * 100\n            ctx.log(f\"📊 {ticker}: 波动率={volatilities[ticker]:.1%}, 权重={weights[ticker]:.1f}%\")\n        else:\n            weights[ticker] = 0\n    \n    ctx.set_target_weights(weights)\n",
+        "description": "",
+        "portfolio_name": "Current",
+        "created_at": "2026-02-06T17:12:22.365761",
+        "updated_at": "2026-02-06T17:12:22.365786"
+    },
+    "RSI均值回归1": {
+        "name": "RSI均值回归1",
+        "code": "\"\"\"\nRSI 均值回归策略 (Mean Reversion)\nRSI 超买/超卖时反向操作。\n\"\"\"\n\ndef strategy():\n    weights = ctx.get_current_weights()\n    \n    # 策略参数\n    rsi_period = 14\n    oversold = 30       # 超卖阈值\n    overbought = 70     # 超买阈值\n    \n    for ticker in ctx.tickers:\n        current_weight = weights.get(ticker, 0)\n        \n        # 计算 RSI\n        rsi = ctx.rsi(ticker, rsi_period)\n        if rsi.empty:\n            continue\n        \n        current_rsi = rsi.iloc[-1]\n        \n        # 超卖: 买入信号\n        if current_rsi < oversold:\n            weights[ticker] = min(current_weight + 10, 50)\n            ctx.log(f\"🟢 {ticker} RSI={current_rsi:.0f} 超卖，增仓\")\n        \n        # 超买: 卖出信号\n        elif current_rsi > overbought:\n            weights[ticker] = max(current_weight - 10, 5)\n            ctx.log(f\"🔴 {ticker} RSI={current_rsi:.0f} 超买，减仓\")\n    \n    ctx.set_target_weights(weights)\n",
+        "description": "",
+        "portfolio_name": "Current",
+        "created_at": "2026-02-06T17:13:16.257854",
+        "updated_at": "2026-02-06T17:13:16.257859"
+    },
+    "动量策略1": {
+        "name": "动量策略1",
+        "code": "\"\"\"\n动量策略 (Momentum Strategy)\n根据过去一段时间的涨幅调整仓位，追涨杀跌。\n\"\"\"\n\ndef strategy():\n    weights = ctx.get_current_weights()\n    \n    # 策略参数\n    lookback = 20       # 动量计算周期\n    threshold = 5       # 动量阈值 (%)\n    \n    for ticker in ctx.tickers:\n        current_weight = weights.get(ticker, 0)\n        \n        # 计算动量\n        mom = ctx.momentum(ticker, lookback)\n        if mom.empty:\n            continue\n        \n        current_momentum = mom.iloc[-1]\n        \n        # 正向动量: 增加仓位\n        if current_momentum > threshold:\n            weights[ticker] = min(current_weight + 5, 40)\n            ctx.log(f\"📈 {ticker} 动量 {current_momentum:.1f}% > {threshold}%, 增仓\")\n        \n        # 负向动量: 减少仓位\n        elif current_momentum < -threshold:\n            weights[ticker] = max(current_weight - 5, 0)\n            ctx.log(f\"📉 {ticker} 动量 {current_momentum:.1f}% < -{threshold}%, 减仓\")\n    \n    ctx.set_target_weights(weights)\n",
+        "description": "",
+        "portfolio_name": "Current",
+        "created_at": "2026-02-06T17:14:38.891411",
+        "updated_at": "2026-02-06T17:14:38.891416"
+    },
+    "VIX波动率1": {
+        "name": "VIX波动率1",
+        "code": "\"\"\"\nVIX 波动率策略 (Volatility Strategy)\n根据 VIX 指数调整风险资产仓位。\n\"\"\"\n\ndef strategy():\n    weights = ctx.get_current_weights()\n    \n    # 策略参数\n    vix_low = 15        # 低波动阈值\n    vix_high = 25       # 高波动阈值\n    vix_panic = 35      # 恐慌阈值\n    \n    # 获取当前 VIX\n    current_vix = ctx.current_vix()\n    ctx.log(f\"📊 当前 VIX: {current_vix:.1f}\")\n    \n    # 定义风险资产和避险资产\n    risk_assets = ['IWY', 'LVHI', 'G3B.SI']  # 根据你的组合调整\n    safe_assets = ['GSD.SI', 'MBH.SI']       # 黄金、债券等\n    \n    if current_vix < vix_low:\n        # 低波动: 激进配置\n        ctx.log(\"🚀 低波动环境，增加风险资产\")\n        for ticker in risk_assets:\n            if ticker in weights:\n                weights[ticker] = weights.get(ticker, 0) * 1.2\n        for ticker in safe_assets:\n            if ticker in weights:\n                weights[ticker] = weights.get(ticker, 0) * 0.8\n    \n    elif current_vix > vix_panic:\n        # 恐慌: 避险配置\n        ctx.log(\"🛡️ 恐慌环境，大幅减少风险资产\")\n        for ticker in risk_assets:\n            if ticker in weights:\n                weights[ticker] = weights.get(ticker, 0) * 0.5\n        for ticker in safe_assets:\n            if ticker in weights:\n                weights[ticker] = weights.get(ticker, 0) * 1.5\n    \n    elif current_vix > vix_high:\n        # 高波动: 谨慎配置\n        ctx.log(\"⚠️ 高波动环境，适度减少风险资产\")\n        for ticker in risk_assets:\n            if ticker in weights:\n                weights[ticker] = weights.get(ticker, 0) * 0.85\n    \n    ctx.set_target_weights(weights)\n",
+        "description": "",
+        "portfolio_name": "Current",
+        "created_at": "2026-02-06T17:15:37.643974",
+        "updated_at": "2026-02-06T17:15:37.643978"
+    },
+    "均线交叉1": {
+        "name": "均线交叉1",
+        "code": "\"\"\"\n均线交叉策略 (Moving Average Crossover)\n当短期均线上穿长期均线时增加仓位，下穿时减少仓位。\n\"\"\"\n\ndef strategy():\n    # 获取当前权重\n    weights = ctx.get_current_weights()\n    \n    # 策略参数\n    short_period = 20   # 短期均线周期\n    long_period = 50    # 长期均线周期\n    \n    # 遍历所有标的\n    for ticker in ctx.tickers:\n        current_weight = weights.get(ticker, 0)\n        \n        # 计算均线\n        short_ma = ctx.ma(ticker, short_period)\n        long_ma = ctx.ma(ticker, long_period)\n        \n        if len(short_ma) < 2 or len(long_ma) < 2:\n            continue\n        \n        # 金叉: 增加仓位\n        if ctx.ma_cross_up(ticker, short_period, long_period):\n            weights[ticker] = min(current_weight + 10, 50)\n            ctx.log(f\"🟢 {ticker} 金叉信号, 增加仓位\")\n        \n        # 死叉: 减少仓位\n        elif ctx.ma_cross_down(ticker, short_period, long_period):\n            weights[ticker] = max(current_weight - 10, 0)\n            ctx.log(f\"🔴 {ticker} 死叉信号, 减少仓位\")\n    \n    # 设置目标权重\n    ctx.set_target_weights(weights)\n",
+        "description": "",
+        "portfolio_name": "Current",
+        "created_at": "2026-02-06T17:16:18.466521",
+        "updated_at": "2026-02-06T17:16:18.466525"
+    }
+}
