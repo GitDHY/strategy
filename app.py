@@ -22,23 +22,23 @@ st.set_page_config(layout="wide", page_title="Stock Strategy Analyzer v1.5")
 
 # --- Helper Functions for Indicators ---
 
-# === 原有阈值 (v1.6 收益增强优化) ===
-VIX_BOOST_LO = 14.0                 # 提高: 13→14，减少激进模式误触发
-VIX_CUT_HI = 23.0                   # 提高: 20→23，延迟防御（VIX 20-23是正常波动）
-VIX_PANIC = 28.0                    # 提高: 25→28，提高恐慌阈值
-YIELD_CURVE_CUTOFF = -0.35          # 放宽: -0.30→-0.35，减少误报
+# === 原有阈值 (v2.0 IWY核心+波动控制优化) ===
+VIX_BOOST_LO = 13.0                 # 降低: 14→13，低波动时更激进配置IWY
+VIX_CUT_HI = 22.0                   # 降低: 23→22，更早启动波动控制
+VIX_PANIC = 30.0                    # 提高: 28→30，真正恐慌才大幅减仓
+YIELD_CURVE_CUTOFF = -0.35          # 保持
 
-# === 优化参数 (v1.6 收益增强) ===
-# 1. 波动率目标机制 - 提高目标波动率以获取更高收益
-TARGET_VOL = 0.14                   # 提高: 0.12→0.14，接受更高波动换取收益
+# === 优化参数 (v2.0 IWY核心+波动控制) ===
+# 1. 波动率目标机制 - 目标波动率控制，IWY主导但整体波动受控
+TARGET_VOL = 0.15                   # 目标年化波动率15%
 VOL_LOOKBACK = 20                   # 保持
-VOL_SCALAR_MAX = 1.8                # 提高: 1.5→1.8，允许更多顺势加仓
-VOL_SCALAR_MIN = 0.4                # 提高: 0.3→0.4，减少过度减仓
+VOL_SCALAR_MAX = 1.6                # 降低: 1.8→1.6，防止过度集中
+VOL_SCALAR_MIN = 0.5                # 提高: 0.4→0.5，保持基础仓位
 
-# 2. 动态止损机制 - 放宽止损线，减少误杀
-DRAWDOWN_STOP_LOSS = -0.12          # 放宽: -0.10→-0.12，减少假突破止损
-DRAWDOWN_REDUCE_RATIO = 0.4         # 降低: 0.5→0.4，止损减仓更温和
-DRAWDOWN_RECOVERY_THRESHOLD = -0.06 # 放宽: -0.05→-0.06
+# 2. 动态止损机制 - v1.9 加速恢复优化
+DRAWDOWN_STOP_LOSS = -0.12          # 保持: -12%触发止损
+DRAWDOWN_REDUCE_RATIO = 0.35        # 降低: 0.4→0.35，止损减仓更温和
+DRAWDOWN_RECOVERY_THRESHOLD = -0.04 # 收紧: -0.06→-0.04，更早开始恢复
 
 # 3. VIX响应平滑化参数 - 提高响应阈值
 VIX_SMOOTH_START = 18.0             # 提高: 15→18，减少低VIX区间的拖累
@@ -51,28 +51,28 @@ SIGNAL_CONFIRM_DAYS = 2             # 保持（将对EXTREME_ACCUMULATION特殊�
 # 5. 再平衡容忍带 - 略微放宽减少交易成本
 REBALANCE_THRESHOLD = 0.06          # 提高: 0.05→0.06
 
-# 6. 状态转换平滑 - 加快过渡
-STATE_TRANSITION_DAYS = 2           # 降低: 3→2，更快响应
+# 6. 状态转换平滑 - v1.9 更快过渡
+STATE_TRANSITION_DAYS = 1           # 降低: 2→1，更快响应状态恢复
 
-# === 新增优化参数（低过拟合风险）v1.6 ===
-# 7. 动量强度分层配置 - 缩窄中性区，减少不必要减仓
-MOMENTUM_STRONG_THRESHOLD = 1.03    # 降低: 1.05→1.03
-MOMENTUM_WEAK_THRESHOLD = 0.93      # 降低: 0.95→0.93（更窄的熊市定义）
-MOMENTUM_NEUTRAL_REDUCTION = 0.08   # 降低: 0.15→0.08，中性区减仓更温和
+# === 新增优化参数（低过拟合风险）v2.0 ===
+# 7. 动量强度分层配置 - 更宽的牛市定义，IWY优先
+MOMENTUM_STRONG_THRESHOLD = 1.02    # 降低: 1.03→1.02，更宽的牛市定义
+MOMENTUM_WEAK_THRESHOLD = 0.92      # 降低: 0.93→0.92，更窄的熊市定义
+MOMENTUM_NEUTRAL_REDUCTION = 0.05   # 降低: 0.08→0.05，中性区减仓更少
 
 # 8. Sahm Rule 预警增强 - 收窄预警区间
 SAHM_EARLY_WARNING_LO = 0.35        # 提高: 0.30→0.35，减少误报
 SAHM_EARLY_WARNING_HI = 0.50        # 保持
 SAHM_REDUCTION_RATE = 0.40          # 降低: 0.50→0.40
 
-# 9. 收益率曲线解倒挂延保护 - 缩短保护期
-YC_UNINVERT_PROTECTION_MONTHS = 9   # 降低: 12→9
-YC_UNINVERT_REDUCTION = 0.15        # 降低: 0.20→0.15
+# 9. 收益率曲线解倒挂延保护 - v1.9 缩短保护期
+YC_UNINVERT_PROTECTION_MONTHS = 6   # 降低: 9→6，更快恢复
+YC_UNINVERT_REDUCTION = 0.10        # 降低: 0.15→0.10，减少减仓
 
-# 10. VIX均值回归加仓 - 增强加仓力度
-VIX_MEAN_REVERSION_PEAK = 23.0      # 降低: 25→23，更早触发加仓
-VIX_MEAN_REVERSION_RATIO = 0.75     # 降低: 0.80→0.75，更早确认回落
-VIX_MEAN_REVERSION_BOOST = 0.12     # 提高: 0.10→0.12
+# 10. VIX均值回归加仓 - v1.9 更激进回归加仓
+VIX_MEAN_REVERSION_PEAK = 22.0      # 降低: 23→22，更早触发加仓
+VIX_MEAN_REVERSION_RATIO = 0.70     # 降低: 0.75→0.70，更早确认VIX回落
+VIX_MEAN_REVERSION_BOOST = 0.15     # 提高: 0.12→0.15，加仓更多
 
 # 11. 相关性动态再配置 - 放宽触发条件
 CORR_MID_THRESHOLD = 0.18           # 提高: 0.15→0.18
@@ -101,13 +101,13 @@ TREND_MA_LONG = 200                 # 保持
 WEAK_BEAR_REDUCTION = 0.20          # 降低: 0.30→0.20
 STRONG_BEAR_REDUCTION = 0.55        # 降低: 0.70→0.55
 
-# 15. 止损分阶段恢复 - 更快恢复
+# 15. 止损分阶段恢复 - v1.9 加速恢复
 STOP_LOSS_RECOVERY_STAGES = [
-    # (回撤阈值, 恢复仓位比例) - 优化后更快恢复
-    (-0.12, 0.55),   # -12%: 55%仓位 (原-10%, 50%)
-    (-0.08, 0.75),   # -8%:  75%仓位 (原-7.5%, 70%)
-    (-0.05, 0.90),   # -5%:  90%仓位 (原-5%, 85%)
-    (-0.02, 1.00),   # -2%:  完全恢复 (原-2.5%)
+    # (回撤阈值, 恢复仓位比例) - 更激进恢复
+    (-0.12, 0.60),   # -12%: 60%仓位 (原55%)
+    (-0.08, 0.80),   # -8%:  80%仓位 (原75%)
+    (-0.04, 0.95),   # -4%:  95%仓位 (原-5%, 90%)
+    (-0.015, 1.00),  # -1.5%: 完全恢复 (原-2%)
 ]
 
 # 16. 跨资产动量 - 降低减仓力度
@@ -149,6 +149,96 @@ VALUE_OUTPERFORM_THRESHOLD = 0.03   # LVHI相对IWY跑赢3%时增配红利
 VALUE_UNDERPERFORM_THRESHOLD = -0.05 # LVHI相对IWY跑输5%时减配红利
 VALUE_ROTATION_AMOUNT = 0.08        # 轮换幅度8%
 
+# === v2.0 新增: 波动率控制因子 ===
+# 23. IWY波动率自适应 - 根据IWY自身波动调整仓位
+IWY_VOL_HIGH = 0.25                 # IWY日波动率年化>25%时减仓
+IWY_VOL_LOW = 0.15                  # IWY日波动率年化<15%时加仓
+IWY_VOL_ADJUST_MAX = 0.12           # 最大调整12%
+
+# 24. LVHI波动缓冲系数 - 红利作为波动缓冲器
+LVHI_VOL_BUFFER_RATIO = 0.30        # IWY减仓时，30%转LVHI（红利抗跌）
+LVHI_MIN_ALLOCATION = 0.10          # LVHI最低配置10%（波动锚定）
+
+# 25. WTMF危机Alpha配置
+WTMF_BASE_ALLOCATION = 0.05         # 基础WTMF配置5%（危机保险）
+WTMF_VOL_TRIGGER = 20.0             # VIX>20时开始增配WTMF
+WTMF_MAX_ALLOCATION = 0.25          # WTMF最大配置25%
+
+# 26. 动态再平衡触发 - 基于波动率而非固定阈值
+REBAL_VOL_MULTIPLIER = 2.0          # 再平衡阈值 = 基础阈值 × (当前波动/目标波动)
+REBAL_MIN_THRESHOLD = 0.04          # 最小再平衡阈值4%
+REBAL_MAX_THRESHOLD = 0.10          # 最大再平衡阈值10%
+
+# 27. 风险平价系数 - IWY为主但控制边际风险贡献
+IWY_MAX_RISK_CONTRIBUTION = 0.75    # IWY最大风险贡献75%
+RISK_PARITY_ENABLED = True          # 启用风险平价调整
+
+# === v2.1 新增: 状态机收益增强优化 ===
+# 28. EXTREME_ACCUMULATION 进入阈值优化 - 更早抄底
+VIX_EXTREME_THRESHOLD = 30.0        # 降低: 32→30，更早触发抄底（历史VIX>30即为恐慌）
+VIX_EXTREME_EXIT = 25.0             # 抄底退出阈值（VIX回落到25以下退出抄底模式）
+
+# 29. 动量加速因子 - 牛市中更激进
+MOMENTUM_ACCELERATION_ENABLED = True
+MOMENTUM_ACCEL_THRESHOLD = 1.05     # 价格>MA*1.05时触发加速
+MOMENTUM_ACCEL_BOOST = 0.08         # 加速时额外加仓8%到IWY
+
+# 30. 状态滞后惩罚 - 减少频繁切换
+STATE_HYSTERESIS_DAYS = 3           # 状态切换需持续3天（防止日内噪音）
+STATE_HYSTERESIS_EXCEPTION = ["EXTREME_ACCUMULATION"]  # 抄底不受限制
+
+# 31. VIX均值回归加速 - 恐慌后更快加仓
+VIX_REVERSION_ACCEL_THRESHOLD = 0.65  # VIX从峰值回落35%以上时加速
+VIX_REVERSION_ACCEL_BOOST = 0.08      # 额外加仓8%
+
+# 32. 趋势确认强化 - 减少假突破
+TREND_CONFIRM_DAYS = 2              # 趋势信号需持续2天
+TREND_CONFIRM_EXCEPTION_VIX = 25.0  # VIX>25时不需确认（危机中快速反应）
+
+# 33. NEUTRAL状态IWY上限 - 牛市中放开限制
+NEUTRAL_IWY_CAP_NORMAL = 0.75       # 正常情况IWY上限75%
+NEUTRAL_IWY_CAP_BULL = 0.82         # 强牛市(VIX<15且动量>5%)IWY上限82%
+
+# === v3.0 新增优化参数 ===
+# 34. 时序动量 (Time-Series Momentum)
+TSMOM_LOOKBACK_FAST = 21            # 1个月动量
+TSMOM_LOOKBACK_SLOW = 126           # 6个月动量
+TSMOM_COMBO_WEIGHT = 0.6            # 快慢动量组合权重 (60%快 + 40%慢)
+TSMOM_THRESHOLD = 0.02              # 动量信号阈值 (>2%才算有效)
+TSMOM_BOOST_AMOUNT = 0.10           # 强动量时额外加仓10%
+TSMOM_ENABLED = True                # 启用时序动量
+
+# 35. 尾部风险控制
+TAIL_RISK_VIX_SPIKE = 8.0           # VIX单日涨幅超过8点触发
+TAIL_RISK_REDUCTION = 0.25          # 尾部风险触发时减仓25%
+TAIL_RISK_RECOVERY_DAYS = 5         # 恢复期5天
+TAIL_RISK_ENABLED = True            # 启用尾部风险控制
+
+# 36. 智能再平衡
+REBAL_COST_BPS = 10                 # 交易成本10bps
+REBAL_EXPECTED_ALPHA = 0.005        # 预期日超额收益0.5%
+REBAL_MIN_EDGE = 2.0                # 预期收益/成本比>2才触发
+SMART_REBAL_ENABLED = True          # 启用智能再平衡
+SMART_REBAL_HARD_THRESHOLD = 0.15   # 单边换手>15%时强制再平衡
+
+# 37. 概率化状态转换
+STATE_CONFIDENCE_THRESHOLD = 0.70   # 状态置信度阈值
+STATE_SMOOTHING_ALPHA = 0.3         # 指数平滑系数
+STATE_LOOKBACK_DAYS = 5             # 状态概率计算回看天数
+PROB_STATE_ENABLED = True           # 启用概率化状态
+
+# 38. 风险平价混合
+RISK_PARITY_TARGET_VOL = 0.12       # 组合目标波动率12%
+RISK_PARITY_BLEND_RATIO = 0.20      # 风险平价混合比例20%
+RISK_PARITY_MIN_WEIGHT = 0.05       # 风险平价最低权重5%
+RISK_PARITY_BLEND_ENABLED = True    # 启用风险平价混合
+
+# 39. 自适应VIX阈值
+ADAPTIVE_VIX_ENABLED = True         # 启用自适应VIX阈值
+VIX_PANIC_PERCENTILE = 0.90         # 使用历史90%分位数作为恐慌阈值
+VIX_CALM_PERCENTILE = 0.20          # 使用历史20%分位数作为平静阈值
+VIX_ADAPTIVE_LOOKBACK = 252         # 自适应VIX回看天数（1年）
+
 # === 资产类别映射 (用于风险暴露分析和邮件生成) ===
 ASSET_CATEGORIES = {
     'IWY': {'category': '权益', 'sub': '美股成长', 'risk_level': 'high'},
@@ -184,18 +274,44 @@ os.makedirs(os.path.dirname(SCHEDULER_LOCK), exist_ok=True)
 os.makedirs(os.path.dirname(STATE_HISTORY_FILE), exist_ok=True)
 
 def normalize_yf_prices(df_raw):
+    """
+    从 yfinance 返回的 DataFrame 中提取调整后收盘价
+    兼容 yfinance 各版本的不同返回格式
+    """
     if df_raw is None or len(df_raw) == 0:
         return pd.DataFrame()
+    
+    # yfinance 新版本可能返回 MultiIndex (Price, Ticker) 或 (Ticker, Price)
     if isinstance(df_raw.columns, pd.MultiIndex):
-        if 'Adj Close' in df_raw.columns.get_level_values(0):
-            return df_raw['Adj Close']
-        if 'Close' in df_raw.columns.get_level_values(0):
-            return df_raw['Close']
+        level_values_0 = df_raw.columns.get_level_values(0).unique().tolist()
+        level_values_1 = df_raw.columns.get_level_values(1).unique().tolist() if df_raw.columns.nlevels > 1 else []
+        
+        # 检查 'Adj Close' 或 'Close' 在哪个 level
+        price_types = ['Adj Close', 'Close', 'Price']
+        
+        for price_type in price_types:
+            if price_type in level_values_0:
+                return df_raw[price_type]
+            elif price_type in level_values_1:
+                # 交换 level 后提取
+                df_swapped = df_raw.swaplevel(axis=1)
+                return df_swapped[price_type]
+        
+        # 如果都没找到，尝试直接返回第一个 level
+        try:
+            return df_raw[level_values_0[0]]
+        except Exception:
+            pass
+        
         return df_raw
+    
+    # 单层列名
     if 'Adj Close' in df_raw.columns:
         return df_raw['Adj Close']
     if 'Close' in df_raw.columns:
         return df_raw['Close']
+    if 'Price' in df_raw.columns:
+        return df_raw['Price']
     return df_raw
 
 
@@ -618,7 +734,7 @@ def record_portfolio_snapshot(total_value, holdings_dict, state=None):
         "state": state
     }
     
-    records = history.get("records", [])
+    records: list[dict] = history.get("records", [])
     # 同一天只保留最新记录
     if records and records[-1].get("date") == date_str:
         records[-1] = record
@@ -1618,116 +1734,122 @@ def base_allocation(s, value_regime=False, vix=None):
     v1.5: CAUTIOUS_VOL 状态支持VIX分层配置
     """
     if s == "INFLATION_SHOCK":
+        # v1.8: 通胀冲击 - 成长清零，WTMF+黄金为主，红利保留（股息抗通胀）
+        # 基准IWY 60%→0%, WTMF 7%→45%, GSD 5%→20%, LVHI 15%→20%
         return {
-            'IWY': 0.00, 'WTMF': 0.50, 'LVHI': 0.15,
-            'G3B.SI': 0.00, 'MBH.SI': 0.00, 'GSD.SI': 0.25,
-            'SRT.SI': 0.00, 'AJBU.SI': 0.10
+            'IWY': 0.00, 'WTMF': 0.45, 'LVHI': 0.20,  # 红利抗通胀
+            'G3B.SI': 0.00, 'MBH.SI': 0.00, 'GSD.SI': 0.20,  # 黄金抗通胀
+            'SRT.SI': 0.05, 'AJBU.SI': 0.10  # REITs抗通胀
         }
     if s == "DEFLATION_RECESSION":
+        # v1.8: 通缩衰退 - 债券为王，黄金避险，少量成长/红利
+        # 基准IWY 60%→10%, MBH 5%→35%, GSD 5%→20%, LVHI 15%→10%
         return {
-            'IWY': 0.05, 'WTMF': 0.20, 'LVHI': 0.05,
-            'G3B.SI': 0.00, 'MBH.SI': 0.40, 'GSD.SI': 0.25,
-            'SRT.SI': 0.00, 'AJBU.SI': 0.05
+            'IWY': 0.10, 'WTMF': 0.15, 'LVHI': 0.10,  # 保留少量权益
+            'G3B.SI': 0.00, 'MBH.SI': 0.35, 'GSD.SI': 0.20,  # 债券+黄金
+            'SRT.SI': 0.05, 'AJBU.SI': 0.05  # REITs在衰退时可能被错杀
         }
     if s == "EXTREME_ACCUMULATION":
-        # v1.7: 极端抄底，纯成长配置
+        # v2.0: 极端抄底，IWY最大化但保留波动缓冲
+        # IWY 75%（不再极端到80%，保留缓冲空间）
         return {
-            'IWY': 0.85, 'WTMF': 0.00, 'LVHI': 0.00,  # IWY: 0.80→0.85
-            'G3B.SI': 0.05, 'MBH.SI': 0.00, 'GSD.SI': 0.00,  # 完全取消避险资产
-            'SRT.SI': 0.05, 'AJBU.SI': 0.05  # REITs作为收益补充
+            'IWY': 0.75, 'WTMF': 0.00, 'LVHI': 0.10,  # LVHI波动缓冲
+            'G3B.SI': 0.05, 'MBH.SI': 0.00, 'GSD.SI': 0.03,
+            'SRT.SI': 0.05, 'AJBU.SI': 0.02
         }
     if s == "CAUTIOUS_TREND":
-        # v1.7: 更激进的红利配置（趋势谨慎但不放弃收益）
-        growth_w = 0.15                # 保留少量成长
-        value_w = 0.25                 # 红利为主
-        wtmf_w = 0.20                  # WTMF对冲
+        # v1.8: 趋势谨慎 - 红利为主，成长减半，WTMF对冲
+        # 基准IWY 60%→25%, LVHI 15%→30%, WTMF 7%→20%
+        growth_w = 0.25                # 成长减半以上
+        value_w = 0.30                 # 红利为主（抗跌+分红）
+        wtmf_w = 0.20                  # WTMF对冲趋势风险
         if value_regime:
-            growth_w = 0.08
-            value_w = 0.32             # 价值占优时更多红利
+            growth_w = 0.15            # 价值占优时进一步减少成长
+            value_w = 0.38             # 更多红利
             wtmf_w = 0.18
         return {
             'IWY': growth_w, 'WTMF': wtmf_w, 'LVHI': value_w,
-            'G3B.SI': 0.08, 'MBH.SI': 0.10, 'GSD.SI': 0.08,
-            'SRT.SI': 0.05, 'AJBU.SI': 0.04
+            'G3B.SI': 0.05, 'MBH.SI': 0.08, 'GSD.SI': 0.07,
+            'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
     if s == "CAUTIOUS_VOL":
-        # v1.7: VIX分层配置 - 动态IWY/WTMF轮换
-        iwy_w = 0.40   # 基础值提高
-        wtmf_w = 0.20  # 基础值降低
-        lvhi_w = 0.15  # 增加红利作为波动缓冲
+        # v2.0: 高波动VIX分层 - IWY仍为核心，但通过LVHI+WTMF控制波动
+        # 核心: IWY始终占主导，但波动越高，WTMF越多
+        iwy_w = 0.50   # 基准65%↓到50%（保持核心地位）
+        wtmf_w = 0.15  # 基准5%↑到15%
+        lvhi_w = 0.15  # LVHI作为波动缓冲
         mbh_w = 0.05
         
         if vix is not None:
-            tier1 = CAUTIOUS_VOL_VIX_TIERS.get('tier1', (20, 25, 0.40, 0.20))
-            tier2 = CAUTIOUS_VOL_VIX_TIERS.get('tier2', (25, 30, 0.30, 0.30))
-            tier3 = CAUTIOUS_VOL_VIX_TIERS.get('tier3', (30, 40, 0.20, 0.40))
-            tier4 = CAUTIOUS_VOL_VIX_TIERS.get('tier4', (40, 999, 0.10, 0.50))
-            
-            if tier1[0] <= vix < tier1[1]:
-                iwy_w = tier1[2]
-                wtmf_w = tier1[3]
+            # VIX分层: 波动越高，IWY↓WTMF↑，但LVHI保持稳定
+            if 20 <= vix < 25:
+                iwy_w = 0.50   # 轻度高波
+                wtmf_w = 0.15
                 lvhi_w = 0.15
-            elif tier2[0] <= vix < tier2[1]:
-                iwy_w = tier2[2]
-                wtmf_w = tier2[3]
+            elif 25 <= vix < 30:
+                iwy_w = 0.42   # 中度高波
+                wtmf_w = 0.22
+                lvhi_w = 0.15  # LVHI保持（红利抗跌）
+            elif 30 <= vix < 40:
+                iwy_w = 0.35   # 重度高波（IWY仍占最大比重）
+                wtmf_w = 0.30
                 lvhi_w = 0.15
-            elif tier3[0] <= vix < tier3[1]:
-                iwy_w = tier3[2]
-                wtmf_w = tier3[3]
-                lvhi_w = 0.12  # 高波动时减少红利
-            elif vix >= tier4[0]:
-                iwy_w = tier4[2]
-                wtmf_w = tier4[3]
-                lvhi_w = 0.10
+            elif vix >= 40:
+                iwy_w = 0.28   # 极端高波（IWY仍为核心）
+                wtmf_w = 0.35
+                lvhi_w = 0.15
         
         return {
             'IWY': iwy_w, 'WTMF': wtmf_w, 'LVHI': lvhi_w,
             'G3B.SI': 0.03, 'MBH.SI': mbh_w, 'GSD.SI': 0.05,
-            'SRT.SI': 0.05, 'AJBU.SI': 0.05
+            'SRT.SI': 0.03, 'AJBU.SI': 0.02
         }
-    # NEUTRAL - v1.7 最大化权益配置（无现金/无WTMF拖累）
-    growth_w = 0.68                   # 提高: 0.60→0.68 (牛市核心)
-    value_w = 0.05                    # 降低: 0.08→0.05 (作为回调缓冲)
-    wtmf_w = 0.0                      # 取消: WTMF在牛市是纯拖累
+    # NEUTRAL - v2.1 IWY核心配置 (IWY 68%, LVHI 10%, WTMF 5%)
+    # 核心思想: IWY主导收益，减少低收益资产拖累
+    growth_w = 0.68                   # IWY核心配置 (提高: 65%→68%)
+    value_w = 0.10                    # LVHI最低缓冲
+    wtmf_w = 0.05                     # WTMF基础危机保险
     if value_regime:
-        growth_w = 0.55               # 价值占优时减少成长
-        value_w = 0.20                # 增加红利
-        wtmf_w = 0.0
+        growth_w = 0.58               # 价值占优时减少成长
+        value_w = 0.18                # 增加红利
+        wtmf_w = 0.05
     return {
         'IWY': growth_w, 'WTMF': wtmf_w, 'LVHI': value_w,
-        'G3B.SI': 0.05, 'MBH.SI': 0.05, 'GSD.SI': 0.03,  # 债券/黄金降到最低
-        'SRT.SI': 0.07, 'AJBU.SI': 0.07  # REITs作为收益补充
+        'G3B.SI': 0.05, 'MBH.SI': 0.04, 'GSD.SI': 0.05,  # 减少债券配置
+        'SRT.SI': 0.03, 'AJBU.SI': 0.00
     }
 
 
 def apply_vix_adjustments(targets, state, vix):
-    """v1.7: VIX驱动的成长↔红利↔WTMF轮换"""
+    """v2.0: VIX驱动的动态调整（IWY核心优化）"""
     if vix is None:
         return
     
     if state == "NEUTRAL":
         if vix < VIX_BOOST_LO:
-            # 极低VIX: 全仓成长，取消所有避险
-            wtmf_amt = targets.get('WTMF', 0)
-            mbh_amt = targets.get('MBH.SI', 0) * 0.8  # 保留20%债券
-            gsd_amt = targets.get('GSD.SI', 0) * 0.5  # 减半黄金
+            # 极低VIX (<13): 从WTMF/避险资产转到IWY（最大化成长）
+            # 但保留LVHI最低配置作为波动锚定
+            wtmf_amt = max(targets.get('WTMF', 0) - WTMF_BASE_ALLOCATION, 0)
+            mbh_amt = targets.get('MBH.SI', 0) * 0.5  # 减50%债券
+            gsd_amt = targets.get('GSD.SI', 0) * 0.3  # 减30%黄金
             
             total_boost = wtmf_amt + mbh_amt + gsd_amt
-            targets['WTMF'] = 0.0
+            targets['WTMF'] = WTMF_BASE_ALLOCATION  # 保持基础WTMF
             targets['MBH.SI'] = targets.get('MBH.SI', 0) - mbh_amt
             targets['GSD.SI'] = targets.get('GSD.SI', 0) - gsd_amt
             targets['IWY'] = targets.get('IWY', 0) + total_boost
             
         elif vix > VIX_GROWTH_TO_VALUE_START:
-            # VIX>22: 开始从成长转向红利（红利更抗跌）
+            # VIX>22: 从IWY转向LVHI+WTMF（波动控制）
+            # IWY仍保持核心地位，但增加波动缓冲
             shift_ratio = min((vix - VIX_GROWTH_TO_VALUE_START) / (VIX_GROWTH_TO_VALUE_FULL - VIX_GROWTH_TO_VALUE_START), 1.0)
-            shift_amt = min(targets.get('IWY', 0), GROWTH_TO_VALUE_MAX_SHIFT * shift_ratio)
+            max_shift = min(targets.get('IWY', 0) * 0.20, 0.12 * shift_ratio)  # 最多转移12%
             
-            if shift_amt > 0:
-                targets['IWY'] -= shift_amt
-                # 70%转红利，30%转WTMF
-                targets['LVHI'] = targets.get('LVHI', 0) + shift_amt * 0.7
-                targets['WTMF'] = targets.get('WTMF', 0) + shift_amt * 0.3
+            if max_shift > 0:
+                targets['IWY'] -= max_shift
+                # 50%转LVHI（红利抗跌），50%转WTMF（危机对冲）
+                targets['LVHI'] = targets.get('LVHI', 0) + max_shift * 0.5
+                targets['WTMF'] = targets.get('WTMF', 0) + max_shift * 0.5
     
     elif state == "CAUTIOUS_VOL":
         # 高波动状态：动态调整已在base_allocation中处理
@@ -1960,9 +2082,9 @@ def apply_market_breadth_adjustment(targets, state, breadth_score):
 
 def apply_trend_boost(targets, state, momentum_scores, vix):
     """
-    v1.7: 趋势驱动的成长↔WTMF动态轮换
-    强牛市: 最大化成长
-    强熊市: WTMF对冲
+    v2.0: 趋势驱动的成长↔WTMF动态轮换（IWY核心优化）
+    强牛市: 最大化IWY，但保留LVHI波动缓冲
+    强熊市: 增加WTMF+LVHI对冲，但保持IWY核心
     """
     if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or not momentum_scores or vix is None:
         return
@@ -1975,33 +2097,38 @@ def apply_trend_boost(targets, state, momentum_scores, vix):
     price_vs_ma = iwy_score + 1  # 转换为 price/ma 比值
     
     if price_vs_ma >= TREND_STRONG_BULL:
-        # 强牛市 (>10%): 最大化成长敞口
-        if vix < 18:  # 只在低波动时激进加仓
-            boost_from_wtmf = targets.get('WTMF', 0)
-            boost_from_lvhi = targets.get('LVHI', 0) * 0.3  # 从红利转30%
-            boost_from_mbh = targets.get('MBH.SI', 0) * 0.5
+        # 强牛市 (>10%): 最大化IWY，但保留LVHI作为波动缓冲
+        if vix < 18:
+            # 从WTMF/MBH转移，但保留LVHI最低配置
+            boost_from_wtmf = max(targets.get('WTMF', 0) - WTMF_BASE_ALLOCATION, 0)
+            boost_from_mbh = targets.get('MBH.SI', 0) * 0.6
             
-            total_boost = boost_from_wtmf + boost_from_lvhi + boost_from_mbh
-            targets['WTMF'] = 0.0
-            targets['LVHI'] = targets.get('LVHI', 0) - boost_from_lvhi
+            total_boost = boost_from_wtmf + boost_from_mbh
+            targets['WTMF'] = max(targets.get('WTMF', 0) - boost_from_wtmf, WTMF_BASE_ALLOCATION)
             targets['MBH.SI'] = targets.get('MBH.SI', 0) - boost_from_mbh
             targets['IWY'] = targets.get('IWY', 0) + total_boost
             
+            # 确保LVHI不低于最低配置
+            if targets.get('LVHI', 0) < LVHI_MIN_ALLOCATION:
+                diff = LVHI_MIN_ALLOCATION - targets.get('LVHI', 0)
+                targets['LVHI'] = LVHI_MIN_ALLOCATION
+                targets['IWY'] = targets.get('IWY', 0) - diff
+            
     elif price_vs_ma >= TREND_MILD_BULL:
-        # 温和牛市 (3-10%): 适度倾斜成长
-        boost_amt = min(targets.get('WTMF', 0), BULL_IWY_BOOST)
+        # 温和牛市 (2-10%): 适度倾斜IWY
+        boost_amt = min(targets.get('WTMF', 0) - WTMF_BASE_ALLOCATION, BULL_IWY_BOOST)
         if boost_amt > 0:
             targets['WTMF'] = targets.get('WTMF', 0) - boost_amt
             targets['IWY'] = targets.get('IWY', 0) + boost_amt
             
     elif price_vs_ma < TREND_MILD_BEAR:
-        # 温和熊市 (<-3%): 增加WTMF对冲
-        # 从成长转移到WTMF和红利
-        shift_amt = min(targets.get('IWY', 0), BEAR_WTMF_BOOST * 0.6)
+        # 温和熊市 (<-3%): IWY减仓，但分散到LVHI和WTMF
+        shift_amt = min(targets.get('IWY', 0) * 0.15, BEAR_WTMF_BOOST)
         if shift_amt > 0:
             targets['IWY'] -= shift_amt
-            targets['WTMF'] = targets.get('WTMF', 0) + shift_amt * 0.7
-            targets['LVHI'] = targets.get('LVHI', 0) + shift_amt * 0.3  # 红利更抗跌
+            # v2.0: 更多转向LVHI（红利抗跌），而非全部WTMF
+            targets['LVHI'] = targets.get('LVHI', 0) + shift_amt * LVHI_VOL_BUFFER_RATIO
+            targets['WTMF'] = targets.get('WTMF', 0) + shift_amt * (1 - LVHI_VOL_BUFFER_RATIO)
 
 
 def apply_value_rotation(targets, state, momentum_scores):
@@ -2029,19 +2156,992 @@ def apply_value_rotation(targets, state, momentum_scores):
             targets['LVHI'] = targets.get('LVHI', 0) + shift_amt
             
     elif relative_strength < VALUE_UNDERPERFORM_THRESHOLD:
-        # 成长跑赢: 从红利转向成长
-        shift_amt = min(targets.get('LVHI', 0) * 0.5, VALUE_ROTATION_AMOUNT)
+        # 成长跑赢: 从红利转向成长（但保持LVHI最低配置）
+        max_shift = targets.get('LVHI', 0) - LVHI_MIN_ALLOCATION
+        shift_amt = min(max_shift, VALUE_ROTATION_AMOUNT)
         if shift_amt > 0:
             targets['LVHI'] -= shift_amt
             targets['IWY'] = targets.get('IWY', 0) + shift_amt
 
 
+def apply_volatility_control(targets, state, vix, iwy_volatility=None):
+    """
+    v2.0 新增: IWY波动率自适应控制
+    根据IWY自身波动率动态调整仓位，高波动时减仓到LVHI/WTMF
+    
+    参数:
+    - iwy_volatility: IWY的20日年化波动率
+    """
+    if state == "EXTREME_ACCUMULATION" or iwy_volatility is None:
+        return
+    
+    iwy_weight = targets.get('IWY', 0)
+    if iwy_weight <= 0:
+        return
+    
+    # 波动率自适应调整
+    if iwy_volatility > IWY_VOL_HIGH:
+        # 高波动: IWY减仓，分散到LVHI和WTMF
+        excess_vol_ratio = min((iwy_volatility - IWY_VOL_HIGH) / (0.35 - IWY_VOL_HIGH), 1.0)
+        reduction = iwy_weight * IWY_VOL_ADJUST_MAX * excess_vol_ratio
+        
+        targets['IWY'] -= reduction
+        # 高波动时优先转WTMF（危机对冲），其次LVHI
+        targets['WTMF'] = targets.get('WTMF', 0) + reduction * 0.6
+        targets['LVHI'] = targets.get('LVHI', 0) + reduction * 0.4
+        
+    elif iwy_volatility < IWY_VOL_LOW and state == "NEUTRAL":
+        # 低波动且牛市: 可以从WTMF/LVHI转回IWY
+        low_vol_ratio = min((IWY_VOL_LOW - iwy_volatility) / (IWY_VOL_LOW - 0.10), 1.0)
+        boost = IWY_VOL_ADJUST_MAX * 0.5 * low_vol_ratio  # 加仓幅度较小
+        
+        # 从WTMF转（保持最低WTMF配置）
+        wtmf_available = max(targets.get('WTMF', 0) - WTMF_BASE_ALLOCATION, 0)
+        from_wtmf = min(wtmf_available, boost * 0.7)
+        
+        if from_wtmf > 0:
+            targets['WTMF'] -= from_wtmf
+            targets['IWY'] += from_wtmf
+
+
+def apply_wtmf_vol_scaling(targets, state, vix):
+    """
+    v2.0 新增: WTMF危机Alpha动态配置
+    VIX驱动的WTMF配置，作为组合波动率缓冲器
+    """
+    if state == "EXTREME_ACCUMULATION" or vix is None:
+        return
+    
+    current_wtmf = targets.get('WTMF', 0)
+    
+    if vix > WTMF_VOL_TRIGGER:
+        # VIX高于触发阈值，增配WTMF
+        vol_excess_ratio = min((vix - WTMF_VOL_TRIGGER) / (40 - WTMF_VOL_TRIGGER), 1.0)
+        target_wtmf = WTMF_BASE_ALLOCATION + (WTMF_MAX_ALLOCATION - WTMF_BASE_ALLOCATION) * vol_excess_ratio
+        
+        if target_wtmf > current_wtmf:
+            # 从IWY转移到WTMF（保持IWY核心地位）
+            iwy_current = targets.get('IWY', 0)
+            transfer_needed = target_wtmf - current_wtmf
+            transfer_from_iwy = min(iwy_current * 0.20, transfer_needed)  # 最多从IWY转20%
+            
+            if transfer_from_iwy > 0:
+                targets['IWY'] -= transfer_from_iwy
+                targets['WTMF'] = current_wtmf + transfer_from_iwy
+    
+    # 确保WTMF不低于基础配置（危机保险）
+    if targets.get('WTMF', 0) < WTMF_BASE_ALLOCATION and state != "EXTREME_ACCUMULATION":
+        shortfall = WTMF_BASE_ALLOCATION - targets.get('WTMF', 0)
+        # 从MBH或GSD补充
+        for source in ['MBH.SI', 'GSD.SI']:
+            if shortfall <= 0:
+                break
+            available = targets.get(source, 0) * 0.5
+            transfer = min(available, shortfall)
+            targets[source] = targets.get(source, 0) - transfer
+            targets['WTMF'] = targets.get('WTMF', 0) + transfer
+            shortfall -= transfer
+
+
+def apply_lvhi_floor(targets, state):
+    """
+    v2.0 新增: LVHI波动缓冲最低配置
+    确保LVHI（红利）作为波动缓冲器的最低配置
+    """
+    if state == "EXTREME_ACCUMULATION":
+        return
+    
+    lvhi_current = targets.get('LVHI', 0)
+    if lvhi_current < LVHI_MIN_ALLOCATION:
+        shortfall = LVHI_MIN_ALLOCATION - lvhi_current
+        # 优先从MBH补充，其次从GSD
+        for source in ['MBH.SI', 'GSD.SI', 'SRT.SI']:
+            if shortfall <= 0:
+                break
+            available = targets.get(source, 0) * 0.5
+            transfer = min(available, shortfall)
+            targets[source] = targets.get(source, 0) - transfer
+            targets['LVHI'] = targets.get('LVHI', 0) + transfer
+            shortfall -= transfer
+
+
+def apply_momentum_acceleration(targets, state, momentum_scores, vix):
+    """
+    v2.1 新增: 动量加速因子
+    强趋势+低波动时，额外加仓IWY
+    """
+    if not MOMENTUM_ACCELERATION_ENABLED:
+        return
+    if state != "NEUTRAL" or not momentum_scores or vix is None:
+        return
+    
+    iwy_score = momentum_scores.get('IWY')
+    if iwy_score is None:
+        return
+    
+    price_vs_ma = iwy_score + 1  # price/ma 比值
+    
+    # 强趋势(>5%) + 低波动(VIX<18) = 动量加速
+    if price_vs_ma >= MOMENTUM_ACCEL_THRESHOLD and vix < 18:
+        # 计算加速幅度（趋势越强，加速越多）
+        excess_momentum = price_vs_ma - MOMENTUM_ACCEL_THRESHOLD
+        accel_ratio = min(excess_momentum / 0.05, 1.0)  # 5%-10%线性加速
+        boost = MOMENTUM_ACCEL_BOOST * accel_ratio
+        
+        # 从低收益资产转移
+        sources = [('MBH.SI', 0.6), ('GSD.SI', 0.4), ('G3B.SI', 0.3)]
+        total_transfer = 0
+        for asset, max_pct in sources:
+            if boost <= 0:
+                break
+            available = targets.get(asset, 0) * max_pct
+            transfer = min(available, boost)
+            targets[asset] = targets.get(asset, 0) - transfer
+            total_transfer += transfer
+            boost -= transfer
+        
+        targets['IWY'] = targets.get('IWY', 0) + total_transfer
+
+
+def apply_vix_reversion_acceleration(targets, state, vix, vix_recent_peak):
+    """
+    v2.1 新增: VIX均值回归加速
+    VIX从峰值大幅回落时，加速加仓
+    """
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or vix is None or vix_recent_peak is None:
+        return
+    if vix_recent_peak < VIX_MEAN_REVERSION_PEAK:
+        return
+    
+    # 计算回落比例
+    reversion_ratio = (vix_recent_peak - vix) / vix_recent_peak
+    
+    if reversion_ratio >= VIX_REVERSION_ACCEL_THRESHOLD:
+        # VIX回落超过35%，触发加速加仓
+        excess_reversion = reversion_ratio - VIX_REVERSION_ACCEL_THRESHOLD
+        accel_ratio = min(excess_reversion / 0.15, 1.0)  # 35%-50%线性加速
+        boost = VIX_REVERSION_ACCEL_BOOST * accel_ratio
+        
+        # 从WTMF转移到IWY（恐慌结束，减少对冲）
+        wtmf_available = max(targets.get('WTMF', 0) - WTMF_BASE_ALLOCATION, 0)
+        transfer = min(wtmf_available, boost)
+        
+        if transfer > 0:
+            targets['WTMF'] -= transfer
+            targets['IWY'] = targets.get('IWY', 0) + transfer
+
+
+def apply_iwy_cap(targets, state, momentum_scores, vix):
+    """
+    v2.1 新增: NEUTRAL状态IWY动态上限
+    牛市中放开IWY上限，允许更高配置
+    """
+    if state != "NEUTRAL":
+        return
+    
+    iwy_current = targets.get('IWY', 0)
+    
+    # 判断是否为强牛市
+    is_strong_bull = False
+    if momentum_scores and vix is not None:
+        iwy_score = momentum_scores.get('IWY')
+        if iwy_score is not None:
+            price_vs_ma = iwy_score + 1
+            is_strong_bull = (vix < 15 and price_vs_ma > 1.05)
+    
+    cap = NEUTRAL_IWY_CAP_BULL if is_strong_bull else NEUTRAL_IWY_CAP_NORMAL
+    
+    if iwy_current > cap:
+        excess = iwy_current - cap
+        targets['IWY'] = cap
+        # 超出部分分配到LVHI
+        targets['LVHI'] = targets.get('LVHI', 0) + excess
+
+
+# === v3.0 新增优化函数 ===
+
+def calculate_tsmom(price_series, lookback_fast=21, lookback_slow=126):
+    """
+    时序动量信号：结合短期和长期动量
+    返回: -1 (空头), 0 (中性), +1 (多头)
+    """
+    if not TSMOM_ENABLED:
+        return 0
+    if price_series is None or len(price_series) < lookback_slow:
+        return 0
+    
+    try:
+        # 计算收益率动量
+        ret_fast = (price_series.iloc[-1] / price_series.iloc[-lookback_fast] - 1)
+        ret_slow = (price_series.iloc[-1] / price_series.iloc[-lookback_slow] - 1)
+        
+        # 加权组合
+        combo_momentum = TSMOM_COMBO_WEIGHT * ret_fast + (1 - TSMOM_COMBO_WEIGHT) * ret_slow
+        
+        if combo_momentum > TSMOM_THRESHOLD:
+            return 1
+        elif combo_momentum < -TSMOM_THRESHOLD:
+            return -1
+        return 0
+    except Exception:
+        return 0
+
+
+def apply_tsmom_boost(targets, state, tsmom_signal, vix):
+    """
+    时序动量增强：趋势强时更激进配置IWY
+    - 正动量+低波动: 从MBH/GSD/WTMF转移到IWY
+    - 负动量: 从IWY转移到WTMF
+    """
+    if not TSMOM_ENABLED:
+        return
+    if state not in ["NEUTRAL", "CAUTIOUS_VOL"] or tsmom_signal == 0 or vix is None:
+        return
+    
+    if tsmom_signal == 1 and vix < 20:
+        # 强动量+低波动：额外加仓IWY
+        boost_sources = [('MBH.SI', 0.5), ('GSD.SI', 0.3), ('WTMF', 0.5)]
+        total_boost = 0
+        remaining_boost = TSMOM_BOOST_AMOUNT
+        
+        for asset, max_pct in boost_sources:
+            if remaining_boost <= 0:
+                break
+            available = targets.get(asset, 0) * max_pct
+            # 保持WTMF基础配置
+            if asset == 'WTMF':
+                available = max(targets.get('WTMF', 0) - WTMF_BASE_ALLOCATION, 0)
+            transfer = min(available, remaining_boost)
+            if transfer > 0:
+                targets[asset] = targets.get(asset, 0) - transfer
+                total_boost += transfer
+                remaining_boost -= transfer
+        
+        targets['IWY'] = targets.get('IWY', 0) + total_boost
+    
+    elif tsmom_signal == -1:
+        # 负动量：从IWY转移到WTMF（防御）
+        iwy_cut = min(targets.get('IWY', 0) * 0.15, 0.10)
+        if iwy_cut > 0:
+            targets['IWY'] -= iwy_cut
+            targets['WTMF'] = targets.get('WTMF', 0) + iwy_cut
+
+
+def detect_vol_spike(vix_history, threshold=None):
+    """检测VIX尖峰（波动率聚集的领先信号）"""
+    if not TAIL_RISK_ENABLED:
+        return False
+    if vix_history is None or len(vix_history) < 2:
+        return False
+    
+    threshold = threshold or TAIL_RISK_VIX_SPIKE
+    try:
+        daily_change = vix_history[-1] - vix_history[-2]
+        return daily_change > threshold
+    except Exception:
+        return False
+
+
+def apply_tail_risk_control(targets, state, vix_history, days_since_spike=None):
+    """
+    尾部风险控制：VIX急涨后的预防性减仓
+    - 避免在恐慌初期被动止损
+    - 分批恢复仓位
+    
+    返回: 更新后的 days_since_spike
+    """
+    if not TAIL_RISK_ENABLED:
+        return days_since_spike
+    if state == "EXTREME_ACCUMULATION":
+        return days_since_spike  # 抄底模式不减仓
+    
+    if detect_vol_spike(vix_history):
+        # 触发尾部风险减仓
+        risk_assets = ['IWY', 'G3B.SI', 'LVHI']
+        for asset in risk_assets:
+            current_weight = targets.get(asset, 0)
+            if current_weight > 0:
+                reduction = current_weight * TAIL_RISK_REDUCTION
+                targets[asset] -= reduction
+                targets['WTMF'] = targets.get('WTMF', 0) + reduction
+        return 0  # 重置恢复计数
+    
+    # 分批恢复逻辑（在调用端处理）
+    if days_since_spike is not None and days_since_spike < TAIL_RISK_RECOVERY_DAYS:
+        return days_since_spike + 1
+    
+    return None
+
+
+def should_rebalance_smart(current_weights, target_weights, expected_returns=None, cost_bps=None):
+    """
+    智能再平衡：只在预期收益超过成本时才调仓
+    expected_returns: dict {ticker: expected_daily_return}
+    返回: (should_rebal, reason)
+    """
+    if not SMART_REBAL_ENABLED:
+        return True, "智能再平衡已禁用"
+    
+    cost_bps = cost_bps or REBAL_COST_BPS
+    expected_returns = expected_returns or {}
+    
+    total_deviation = 0
+    expected_gain = 0
+    
+    all_assets = set(current_weights.keys()) | set(target_weights.keys())
+    
+    for asset in all_assets:
+        curr_w = current_weights.get(asset, 0)
+        tgt_w = target_weights.get(asset, 0)
+        deviation = tgt_w - curr_w
+        total_deviation += abs(deviation)
+        
+        # 预期收益 = 偏离度 × 预期超额收益
+        exp_ret = expected_returns.get(asset, REBAL_EXPECTED_ALPHA)
+        expected_gain += deviation * exp_ret
+    
+    trading_cost = total_deviation * cost_bps / 10000
+    one_side_turnover = total_deviation / 2
+    
+    # 硬阈值强制再平衡
+    if one_side_turnover > SMART_REBAL_HARD_THRESHOLD:
+        return True, f"单边换手{one_side_turnover*100:.1f}%超过硬阈值{SMART_REBAL_HARD_THRESHOLD*100:.0f}%"
+    
+    # 收益/成本比判断
+    if trading_cost > 0:
+        edge_ratio = expected_gain / trading_cost
+        if edge_ratio > REBAL_MIN_EDGE:
+            return True, f"收益/成本比{edge_ratio:.1f}>{REBAL_MIN_EDGE:.0f}"
+    
+    # 原有阈值作为备用
+    if one_side_turnover > REBALANCE_THRESHOLD:
+        return True, f"偏离{one_side_turnover*100:.1f}%超过阈值{REBALANCE_THRESHOLD*100:.0f}%"
+    
+    return False, f"偏离{one_side_turnover*100:.1f}%未达阈值，暂不调仓"
+
+
+def get_smoothed_state(current_state, prev_state, prev_confidence, alpha=None):
+    """
+    指数平滑状态转换：减少噪音但保持响应性
+    返回: (state, confidence)
+    """
+    if not PROB_STATE_ENABLED:
+        return current_state, 1.0
+    
+    alpha = alpha or STATE_SMOOTHING_ALPHA
+    
+    if current_state == prev_state:
+        # 同状态，增强置信度
+        new_confidence = min(1.0, prev_confidence + alpha * (1 - prev_confidence))
+    else:
+        # 状态切换，降低置信度
+        new_confidence = alpha  # 重置为初始置信度
+    
+    # 特例：EXTREME_ACCUMULATION 不受限制（快速响应抄底机会）
+    if current_state in STATE_HYSTERESIS_EXCEPTION:
+        return current_state, new_confidence
+    
+    # 只在置信度足够时才切换状态
+    if current_state != prev_state and new_confidence < STATE_CONFIDENCE_THRESHOLD:
+        return prev_state, new_confidence  # 维持原状态
+    
+    return current_state, new_confidence
+
+
+def calculate_risk_parity_weights(returns_df, target_vol=None, min_weight=None):
+    """
+    逆波动率加权的简化风险平价
+    returns_df: 各资产日收益率DataFrame
+    返回: dict {ticker: weight}
+    """
+    if not RISK_PARITY_BLEND_ENABLED:
+        return {}
+    if returns_df is None or returns_df.empty:
+        return {}
+    
+    target_vol = target_vol or RISK_PARITY_TARGET_VOL
+    min_weight = min_weight or RISK_PARITY_MIN_WEIGHT
+    
+    try:
+        vol = returns_df.std() * np.sqrt(252)  # 年化波动率
+        inv_vol = 1 / vol
+        inv_vol = inv_vol.replace([np.inf, -np.inf], 0)
+        inv_vol = inv_vol.fillna(0)
+        
+        # 逆波动率加权
+        if inv_vol.sum() <= 0:
+            return {}
+        
+        raw_weights = inv_vol / inv_vol.sum()
+        
+        # 应用最低权重约束
+        weights = raw_weights.clip(lower=min_weight)
+        weights = weights / weights.sum()
+        
+        return weights.to_dict()
+    except Exception:
+        return {}
+
+
+def blend_with_risk_parity(strategic_weights, risk_parity_weights, blend_ratio=None):
+    """
+    策略权重与风险平价权重混合
+    blend_ratio: 风险平价的混合比例
+    """
+    if not RISK_PARITY_BLEND_ENABLED or not risk_parity_weights:
+        return strategic_weights
+    
+    blend_ratio = blend_ratio or RISK_PARITY_BLEND_RATIO
+    blended = {}
+    all_assets = set(strategic_weights.keys()) | set(risk_parity_weights.keys())
+    
+    for asset in all_assets:
+        strat_w = strategic_weights.get(asset, 0)
+        rp_w = risk_parity_weights.get(asset, 0)
+        blended[asset] = (1 - blend_ratio) * strat_w + blend_ratio * rp_w
+    
+    # 归一化
+    total = sum(blended.values())
+    if total > 0:
+        return {k: v / total for k, v in blended.items()}
+    return strategic_weights
+
+
+# === 组合优化器 (Portfolio Optimizer) ===
+
+def portfolio_optimizer_metrics(weights, mean_returns, cov_matrix):
+    """
+    计算组合的收益、波动率和夏普比率
+    weights: numpy array
+    mean_returns: 年化收益率
+    cov_matrix: 协方差矩阵
+    """
+    portfolio_return = np.dot(weights, mean_returns)
+    portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    sharpe = portfolio_return / portfolio_vol if portfolio_vol > 0 else 0
+    return portfolio_return, portfolio_vol, sharpe
+
+
+def optimize_max_sharpe(mean_returns, cov_matrix, risk_free_rate=0.04, 
+                        min_weight=0.0, max_weight=1.0, n_iterations=10000):
+    """
+    最大夏普比率优化 (蒙特卡洛模拟 + 梯度优化)
+    使用无外部依赖的方法
+    """
+    n_assets = len(mean_returns)
+    
+    best_sharpe = -np.inf
+    best_weights = np.ones(n_assets) / n_assets
+    
+    # 蒙特卡洛随机搜索
+    for _ in range(n_iterations):
+        weights = np.random.random(n_assets)
+        weights = weights / weights.sum()
+        
+        # 应用权重约束
+        weights = np.clip(weights, min_weight, max_weight)
+        weights = weights / weights.sum()
+        
+        port_return, port_vol, sharpe = portfolio_optimizer_metrics(
+            weights, mean_returns, cov_matrix
+        )
+        
+        excess_return = port_return - risk_free_rate
+        adj_sharpe = excess_return / port_vol if port_vol > 0 else 0
+        
+        if adj_sharpe > best_sharpe:
+            best_sharpe = adj_sharpe
+            best_weights = weights.copy()
+    
+    return best_weights, best_sharpe
+
+
+def optimize_min_volatility(mean_returns, cov_matrix, 
+                            min_weight=0.0, max_weight=1.0, n_iterations=10000):
+    """
+    最小波动率优化
+    """
+    n_assets = len(mean_returns)
+    
+    best_vol = np.inf
+    best_weights = np.ones(n_assets) / n_assets
+    
+    for _ in range(n_iterations):
+        weights = np.random.random(n_assets)
+        weights = weights / weights.sum()
+        weights = np.clip(weights, min_weight, max_weight)
+        weights = weights / weights.sum()
+        
+        port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        
+        if port_vol < best_vol:
+            best_vol = port_vol
+            best_weights = weights.copy()
+    
+    return best_weights, best_vol
+
+
+def optimize_max_return_given_vol(mean_returns, cov_matrix, target_vol=0.12,
+                                   min_weight=0.0, max_weight=1.0, n_iterations=10000):
+    """
+    给定波动率下最大化收益
+    """
+    n_assets = len(mean_returns)
+    
+    best_return = -np.inf
+    best_weights = np.ones(n_assets) / n_assets
+    tolerance = 0.02  # 允许2%误差
+    
+    for _ in range(n_iterations):
+        weights = np.random.random(n_assets)
+        weights = weights / weights.sum()
+        weights = np.clip(weights, min_weight, max_weight)
+        weights = weights / weights.sum()
+        
+        port_return, port_vol, _ = portfolio_optimizer_metrics(
+            weights, mean_returns, cov_matrix
+        )
+        
+        # 只接受波动率在目标附近的组合
+        if abs(port_vol - target_vol) <= tolerance:
+            if port_return > best_return:
+                best_return = port_return
+                best_weights = weights.copy()
+    
+    return best_weights, best_return
+
+
+def calculate_efficient_frontier(mean_returns, cov_matrix, n_points=50, 
+                                  min_weight=0.0, max_weight=1.0):
+    """
+    计算有效前沿
+    返回: list of (volatility, return, weights)
+    """
+    n_assets = len(mean_returns)
+    
+    # 先找到最小波动率和最大收益的边界
+    min_vol_weights, min_vol = optimize_min_volatility(
+        mean_returns, cov_matrix, min_weight, max_weight, 5000
+    )
+    min_vol_ret = np.dot(min_vol_weights, mean_returns)
+    
+    # 最大收益（全押最高收益资产，受max_weight限制）
+    max_ret_idx = np.argmax(mean_returns)
+    max_possible_ret = mean_returns[max_ret_idx]
+    
+    # 生成目标收益序列
+    target_returns = np.linspace(min_vol_ret, max_possible_ret * 0.95, n_points)
+    
+    frontier = []
+    for target_ret in target_returns:
+        best_vol = np.inf
+        best_weights = None
+        
+        # 搜索满足目标收益的最小波动率组合
+        for _ in range(3000):
+            weights = np.random.random(n_assets)
+            weights = weights / weights.sum()
+            weights = np.clip(weights, min_weight, max_weight)
+            weights = weights / weights.sum()
+            
+            port_return, port_vol, _ = portfolio_optimizer_metrics(
+                weights, mean_returns, cov_matrix
+            )
+            
+            # 收益需要接近目标
+            if abs(port_return - target_ret) <= 0.02:
+                if port_vol < best_vol:
+                    best_vol = port_vol
+                    best_weights = weights.copy()
+        
+        if best_weights is not None:
+            frontier.append((best_vol, target_ret, best_weights))
+    
+    return frontier
+
+
+def calculate_risk_contribution(weights, cov_matrix):
+    """
+    计算各资产的风险贡献
+    """
+    portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    if portfolio_vol == 0:
+        return np.zeros(len(weights))
+    
+    # 边际风险贡献
+    marginal_risk = np.dot(cov_matrix, weights) / portfolio_vol
+    
+    # 风险贡献 = 权重 × 边际风险
+    risk_contribution = weights * marginal_risk
+    
+    # 归一化为百分比
+    total_risk = risk_contribution.sum()
+    if total_risk > 0:
+        return risk_contribution / total_risk
+    return risk_contribution
+
+
+def optimize_risk_parity_full(cov_matrix, min_weight=0.02, max_weight=0.50, n_iterations=10000):
+    """
+    真正的风险平价优化：使各资产风险贡献相等
+    """
+    n_assets = cov_matrix.shape[0]
+    target_risk = 1.0 / n_assets  # 每个资产的目标风险贡献
+    
+    best_weights = np.ones(n_assets) / n_assets
+    best_error = np.inf
+    
+    for _ in range(n_iterations):
+        weights = np.random.random(n_assets)
+        weights = weights / weights.sum()
+        weights = np.clip(weights, min_weight, max_weight)
+        weights = weights / weights.sum()
+        
+        risk_contrib = calculate_risk_contribution(weights, cov_matrix)
+        
+        # 计算与目标的误差
+        error = np.sum((risk_contrib - target_risk) ** 2)
+        
+        if error < best_error:
+            best_error = error
+            best_weights = weights.copy()
+    
+    return best_weights, calculate_risk_contribution(best_weights, cov_matrix)
+
+
+def run_portfolio_optimization(price_df, tickers, risk_free_rate=0.04, 
+                                min_weight=0.0, max_weight=0.50):
+    """
+    运行完整的组合优化
+    price_df: 价格DataFrame (日期为index，ticker为columns)
+    tickers: 资产列表
+    
+    返回: dict with optimization results
+    """
+    # 计算日收益率
+    returns = price_df[tickers].pct_change().dropna()
+    
+    if len(returns) < 60:  # 至少需要60天数据
+        return {"error": "数据不足，需要至少60个交易日"}
+    
+    # 年化收益和协方差
+    mean_returns = returns.mean() * 252
+    cov_matrix = returns.cov() * 252
+    
+    results = {
+        "tickers": tickers,
+        "mean_returns": mean_returns.to_dict(),
+        "volatility": (returns.std() * np.sqrt(252)).to_dict(),
+        "correlation": returns.corr().to_dict(),
+    }
+    
+    # 1. 等权重基准
+    equal_weights = np.ones(len(tickers)) / len(tickers)
+    eq_ret, eq_vol, eq_sharpe = portfolio_optimizer_metrics(
+        equal_weights, mean_returns.values, cov_matrix.values
+    )
+    results["equal_weight"] = {
+        "weights": dict(zip(tickers, equal_weights)),
+        "return": eq_ret,
+        "volatility": eq_vol,
+        "sharpe": (eq_ret - risk_free_rate) / eq_vol if eq_vol > 0 else 0
+    }
+    
+    # 2. 最大夏普比率
+    max_sharpe_w, max_sharpe = optimize_max_sharpe(
+        mean_returns.values, cov_matrix.values, risk_free_rate, min_weight, max_weight
+    )
+    ms_ret, ms_vol, _ = portfolio_optimizer_metrics(
+        max_sharpe_w, mean_returns.values, cov_matrix.values
+    )
+    results["max_sharpe"] = {
+        "weights": dict(zip(tickers, max_sharpe_w)),
+        "return": ms_ret,
+        "volatility": ms_vol,
+        "sharpe": max_sharpe
+    }
+    
+    # 3. 最小波动率
+    min_vol_w, min_vol = optimize_min_volatility(
+        mean_returns.values, cov_matrix.values, min_weight, max_weight
+    )
+    mv_ret, mv_vol, _ = portfolio_optimizer_metrics(
+        min_vol_w, mean_returns.values, cov_matrix.values
+    )
+    results["min_volatility"] = {
+        "weights": dict(zip(tickers, min_vol_w)),
+        "return": mv_ret,
+        "volatility": mv_vol,
+        "sharpe": (mv_ret - risk_free_rate) / mv_vol if mv_vol > 0 else 0
+    }
+    
+    # 4. 风险平价
+    rp_weights, rp_risk_contrib = optimize_risk_parity_full(
+        cov_matrix.values, max(min_weight, 0.02), max_weight
+    )
+    rp_ret, rp_vol, _ = portfolio_optimizer_metrics(
+        rp_weights, mean_returns.values, cov_matrix.values
+    )
+    results["risk_parity"] = {
+        "weights": dict(zip(tickers, rp_weights)),
+        "return": rp_ret,
+        "volatility": rp_vol,
+        "sharpe": (rp_ret - risk_free_rate) / rp_vol if rp_vol > 0 else 0,
+        "risk_contribution": dict(zip(tickers, rp_risk_contrib))
+    }
+    
+    # 5. 目标波动率12%
+    target_vol_w, target_vol_ret = optimize_max_return_given_vol(
+        mean_returns.values, cov_matrix.values, target_vol=0.12, 
+        min_weight=min_weight, max_weight=max_weight
+    )
+    tv_ret, tv_vol, _ = portfolio_optimizer_metrics(
+        target_vol_w, mean_returns.values, cov_matrix.values
+    )
+    results["target_vol_12"] = {
+        "weights": dict(zip(tickers, target_vol_w)),
+        "return": tv_ret,
+        "volatility": tv_vol,
+        "sharpe": (tv_ret - risk_free_rate) / tv_vol if tv_vol > 0 else 0
+    }
+    
+    # 6. 有效前沿
+    frontier = calculate_efficient_frontier(
+        mean_returns.values, cov_matrix.values, n_points=30, 
+        min_weight=min_weight, max_weight=max_weight
+    )
+    results["efficient_frontier"] = [
+        {"volatility": f[0], "return": f[1]} for f in frontier
+    ]
+    
+    return results
+
+
+def render_optimization_results(opt_results, price_df, tickers):
+    """
+    渲染优化结果的UI
+    """
+    if "error" in opt_results:
+        st.error(opt_results["error"])
+        return
+    
+    st.markdown("### 📊 资产统计")
+    
+    # 资产收益/波动率表
+    stats_data = []
+    for t in tickers:
+        stats_data.append({
+            "资产": t,
+            "年化收益": f"{opt_results['mean_returns'].get(t, 0)*100:.1f}%",
+            "年化波动": f"{opt_results['volatility'].get(t, 0)*100:.1f}%",
+            "收益/波动": f"{opt_results['mean_returns'].get(t, 0)/opt_results['volatility'].get(t, 1):.2f}"
+        })
+    st.dataframe(pd.DataFrame(stats_data), use_container_width=True, hide_index=True)
+    
+    # 相关性矩阵
+    with st.expander("🔗 相关性矩阵", expanded=False):
+        corr_df = pd.DataFrame(opt_results['correlation'])
+        st.dataframe(corr_df.style.background_gradient(cmap='RdYlGn_r', vmin=-1, vmax=1).format("{:.2f}"))
+    
+    st.markdown("### 🎯 优化结果对比")
+    
+    # 优化方案对比表
+    strategies = [
+        ("equal_weight", "等权重", "📊"),
+        ("max_sharpe", "最大夏普", "⭐"),
+        ("min_volatility", "最小波动", "🛡️"),
+        ("risk_parity", "风险平价", "⚖️"),
+        ("target_vol_12", "目标波动12%", "🎯"),
+    ]
+    
+    compare_data = []
+    for key, name, icon in strategies:
+        if key in opt_results:
+            res = opt_results[key]
+            compare_data.append({
+                "策略": f"{icon} {name}",
+                "年化收益": f"{res['return']*100:.1f}%",
+                "年化波动": f"{res['volatility']*100:.1f}%",
+                "夏普比率": f"{res['sharpe']:.2f}",
+            })
+    
+    st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
+    
+    # 最优配置推荐
+    st.markdown("### ⭐ 推荐配置")
+    
+    # 选择推荐策略
+    best_strategy = "max_sharpe"
+    if opt_results.get("max_sharpe", {}).get("sharpe", 0) < opt_results.get("risk_parity", {}).get("sharpe", 0):
+        best_strategy = "risk_parity"
+    
+    rec = opt_results.get(best_strategy, opt_results.get("equal_weight", {}))
+    rec_weights = rec.get("weights", {})
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.markdown(f"**推荐策略: {best_strategy.replace('_', ' ').title()}**")
+        st.metric("预期年化收益", f"{rec.get('return', 0)*100:.1f}%")
+        st.metric("预期年化波动", f"{rec.get('volatility', 0)*100:.1f}%")
+        st.metric("夏普比率", f"{rec.get('sharpe', 0):.2f}")
+    
+    with col2:
+        # 配置饼图
+        fig = go.Figure(data=[go.Pie(
+            labels=list(rec_weights.keys()),
+            values=[v*100 for v in rec_weights.values()],
+            hole=0.4,
+            textinfo='label+percent',
+            textposition='outside'
+        )])
+        fig.update_layout(
+            title="推荐配置比例",
+            height=300,
+            margin=dict(t=40, b=20, l=20, r=20)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # 详细权重表
+    st.markdown("### 📋 各策略详细权重")
+    
+    weights_df_data = {"资产": tickers}
+    for key, name, _ in strategies:
+        if key in opt_results:
+            weights = opt_results[key].get("weights", {})
+            weights_df_data[name] = [f"{weights.get(t, 0)*100:.1f}%" for t in tickers]
+    
+    st.dataframe(pd.DataFrame(weights_df_data), use_container_width=True, hide_index=True)
+    
+    # 有效前沿图
+    st.markdown("### 📈 有效前沿")
+    
+    frontier = opt_results.get("efficient_frontier", [])
+    if frontier:
+        fig = go.Figure()
+        
+        # 有效前沿线
+        fig.add_trace(go.Scatter(
+            x=[f["volatility"]*100 for f in frontier],
+            y=[f["return"]*100 for f in frontier],
+            mode='lines',
+            name='有效前沿',
+            line=dict(color='blue', width=2)
+        ))
+        
+        # 各策略点
+        colors = {'equal_weight': 'gray', 'max_sharpe': 'gold', 
+                  'min_volatility': 'green', 'risk_parity': 'purple', 'target_vol_12': 'red'}
+        names = {'equal_weight': '等权重', 'max_sharpe': '最大夏普', 
+                 'min_volatility': '最小波动', 'risk_parity': '风险平价', 'target_vol_12': '目标波动12%'}
+        
+        for key in ['equal_weight', 'max_sharpe', 'min_volatility', 'risk_parity', 'target_vol_12']:
+            if key in opt_results:
+                res = opt_results[key]
+                fig.add_trace(go.Scatter(
+                    x=[res['volatility']*100],
+                    y=[res['return']*100],
+                    mode='markers+text',
+                    name=names[key],
+                    marker=dict(size=12, color=colors[key]),
+                    text=[names[key]],
+                    textposition='top center'
+                ))
+        
+        # 单个资产点
+        for t in tickers:
+            fig.add_trace(go.Scatter(
+                x=[opt_results['volatility'].get(t, 0)*100],
+                y=[opt_results['mean_returns'].get(t, 0)*100],
+                mode='markers+text',
+                name=t,
+                marker=dict(size=8, symbol='diamond'),
+                text=[t],
+                textposition='bottom center',
+                showlegend=False
+            ))
+        
+        fig.update_layout(
+            title="风险-收益有效前沿",
+            xaxis_title="年化波动率 (%)",
+            yaxis_title="年化收益率 (%)",
+            height=500,
+            hovermode='closest'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # 风险贡献图 (风险平价)
+    if "risk_parity" in opt_results and "risk_contribution" in opt_results["risk_parity"]:
+        st.markdown("### ⚖️ 风险平价 - 风险贡献分解")
+        
+        rp = opt_results["risk_parity"]
+        rc = rp["risk_contribution"]
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=list(rc.keys()),
+            y=[v*100 for v in rc.values()],
+            name='风险贡献',
+            marker_color='purple'
+        ))
+        fig.add_trace(go.Bar(
+            x=list(rp["weights"].keys()),
+            y=[v*100 for v in rp["weights"].values()],
+            name='权重',
+            marker_color='lightblue'
+        ))
+        fig.update_layout(
+            title="风险平价: 权重 vs 风险贡献",
+            xaxis_title="资产",
+            yaxis_title="百分比 (%)",
+            barmode='group',
+            height=350
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def get_adaptive_vix_thresholds(vix_history, lookback=None):
+    """
+    基于滚动历史计算VIX阈值，避免前视偏差
+    返回: (panic_threshold, calm_threshold)
+    """
+    if not ADAPTIVE_VIX_ENABLED:
+        return VIX_EXTREME_THRESHOLD, VIX_BOOST_LO
+    
+    lookback = lookback or VIX_ADAPTIVE_LOOKBACK
+    
+    if vix_history is None or len(vix_history) < lookback:
+        return VIX_EXTREME_THRESHOLD, VIX_BOOST_LO
+    
+    try:
+        rolling_vix = vix_history[-lookback:]
+        panic_threshold = np.percentile(rolling_vix, VIX_PANIC_PERCENTILE * 100)
+        calm_threshold = np.percentile(rolling_vix, VIX_CALM_PERCENTILE * 100)
+        return panic_threshold, calm_threshold
+    except Exception:
+        return VIX_EXTREME_THRESHOLD, VIX_BOOST_LO
+
+
 def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=None, vix=None, yield_curve=None,
                            sahm=None, corr=None, momentum_scores=None, yc_recently_inverted=False, vix_recent_peak=None,
-                           dual_ma_signals=None, breadth_score=None):
+                           dual_ma_signals=None, breadth_score=None, iwy_volatility=None,
+                           tsmom_signal=None, vix_history=None, risk_parity_weights=None):
     """
     Returns target asset allocation based on macro state.
     Shared by State Machine Diagnosis and Backtest.
+    
+    v3.0 新增参数:
+    - tsmom_signal: 时序动量信号 (-1, 0, +1)
+    - vix_history: VIX历史序列，用于尾部风险控制
+    - risk_parity_weights: 风险平价权重字典
+    
+    v2.1 新增:
+    - 动量加速因子
+    - VIX均值回归加速
+    - NEUTRAL状态IWY动态上限
+    
+    v2.0 新增参数:
+    - iwy_volatility: IWY的20日年化波动率，用于波动率自适应控制
     
     v1.5 新增参数:
     - dual_ma_signals: dict {ticker: 'STRONG_BEAR'|'WEAK_BEAR'|'BULLISH'}
@@ -2068,6 +3168,15 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     # 新增优化调整（按影响程度排序，后执行的优先级更高）
     apply_momentum_intensity(targets, s, momentum_scores)
     apply_sahm_early_warning(targets, s, sahm)
+    
+    # v3.0: 时序动量增强（在其他调整之后，波动率控制之前）
+    if tsmom_signal is not None:
+        apply_tsmom_boost(targets, s, tsmom_signal, vix)
+    
+    # v3.0: 尾部风险控制
+    if vix_history is not None and len(vix_history) >= 2:
+        apply_tail_risk_control(targets, s, vix_history)
+    
     apply_yield_curve_uninvert_protection(targets, s, yield_curve, yc_recently_inverted)
     apply_correlation_adjustment(targets, s, corr)
     apply_vix_mean_reversion(targets, s, vix, vix_recent_peak)
@@ -2079,7 +3188,19 @@ def get_target_percentages(s, gold_bear=False, value_regime=False, asset_trends=
     apply_trend_boost(targets, s, momentum_scores, vix)
     apply_value_rotation(targets, s, momentum_scores)
     
-    # 现金缓冲已禁用（v1.7）
+    # v2.0: 波动率控制（IWY为核心，控制整体波动）
+    apply_volatility_control(targets, s, vix, iwy_volatility)
+    apply_wtmf_vol_scaling(targets, s, vix)
+    apply_lvhi_floor(targets, s)
+    
+    # v2.1: 收益增强优化
+    apply_momentum_acceleration(targets, s, momentum_scores, vix)
+    apply_vix_reversion_acceleration(targets, s, vix, vix_recent_peak)
+    apply_iwy_cap(targets, s, momentum_scores, vix)
+    
+    # v3.0: 风险平价混合（最后执行，作为整体权重调整）
+    if risk_parity_weights and RISK_PARITY_BLEND_ENABLED:
+        targets = blend_with_risk_parity(targets, risk_parity_weights)
 
     return targets
 
@@ -3087,8 +4208,10 @@ def calculate_equity_curve_metrics(series, risk_free_rate=0.03):
     # Logic: Find peaks, fill dates forward, subtract current date from last peak date
     is_peak = series == rolling_max
     peak_dates = pd.Series(series.index, index=series.index).where(is_peak).ffill()
-    dd_days = series.index - peak_dates
-    max_dd_days = dd_days.max().days if not dd_days.empty else 0
+    # 转换为 DatetimeIndex 以正确计算日期差
+    peak_dates_dt = pd.to_datetime(peak_dates)
+    dd_days = pd.to_datetime(series.index) - peak_dates_dt
+    max_dd_days = dd_days.max().days if len(dd_days) > 0 and pd.notna(dd_days.max()) else 0
     
     # 3. Daily Returns Analysis
     daily_ret = series.pct_change().fillna(0)
@@ -3195,20 +4318,29 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
     # 2. Fetch Price Data
     fetch_start = pd.to_datetime(start_date) - pd.Timedelta(days=365)
     
+    price_data = None
     try:
-        price_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)['Adj Close']
-    except:
-        # Fallback if Adj Close issue
-        try:
-             price_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)['Close']
-        except Exception as e:
-            return None, None, f"Data fetch failed: {e}"
+        raw_data = yf.download(assets, start=fetch_start, end=end_date, progress=False, auto_adjust=False)
+        if raw_data is not None and not raw_data.empty:
+            price_data = normalize_yf_prices(raw_data)
+    except Exception as e:
+        return None, None, f"数据下载失败: {e}"
+    
+    if price_data is None or (hasattr(price_data, 'empty') and price_data.empty):
+        return None, None, f"无法获取价格数据。资产列表: {assets}，日期范围: {fetch_start.date()} ~ {end_date}"
 
-    if price_data.empty:
-         return None, None, "No price data fetched."
+    # 转换为DataFrame（如果是Series）
+    if isinstance(price_data, pd.Series):
+        price_data = price_data.to_frame(name=assets[0] if assets else 'Price')
 
     # Fill missing
     price_data = price_data.ffill().bfill()
+    
+    # 检查有效列
+    valid_cols = [c for c in price_data.columns if price_data[c].notna().sum() > 10]
+    if not valid_cols:
+        return None, None, f"所有资产数据均无效或数据点不足"
+    price_data = price_data[valid_cols]
     
     # Calculate Asset Trends for Backtest (Dual Momentum)
     # Use dynamic MA window
@@ -3454,12 +4586,24 @@ def run_dynamic_backtest(df_states, start_date, end_date, initial_capital=10000.
             if len(yc_history) > 0:
                 yc_recently_inverted = (yc_history.min() < -0.20)
         
+        # v2.0: 计算IWY波动率（20日年化）用于波动率自适应控制
+        iwy_vol = None
+        iwy_proxy = 'IWY'
+        if use_proxies:
+            iwy_proxy = '^NDX' if '^NDX' in price_data.columns else '^GSPC'
+        if iwy_proxy in returns_df.columns and decision_date in returns_df.index:
+            vol_start = max(0, returns_df.index.get_loc(decision_date) - VOL_LOOKBACK)
+            iwy_rets = returns_df[iwy_proxy].iloc[vol_start:returns_df.index.get_loc(decision_date)+1]
+            if len(iwy_rets) > 5:  # 至少需要5天数据
+                iwy_vol = iwy_rets.std() * np.sqrt(252)  # 年化波动率
+        
         # Calculate base target weights (with new optimization parameters)
         targets = get_target_percentages(
             s, gold_bear=gb, value_regime=vr, asset_trends=daily_trends, 
             vix=vix_val, yield_curve=yc_val,
             sahm=sahm_val, corr=corr_val, momentum_scores=momentum_scores,
-            yc_recently_inverted=yc_recently_inverted, vix_recent_peak=vix_recent_peak
+            yc_recently_inverted=yc_recently_inverted, vix_recent_peak=vix_recent_peak,
+            iwy_volatility=iwy_vol
         )
         
         # === 优化4: VIX响应平滑化 ===
@@ -3883,13 +5027,14 @@ def determine_macro_state(row, params=None):
     """
     Determines macro state based on a row of indicators.
     Expected row keys: Sahm, RateShock, Corr, VIX, Trend_Bear
+    v2.1: 优化EXTREME_ACCUMULATION触发条件，更早抄底
     """
     if params is None:
         params = {
             'sahm_threshold': 0.50,
             'rate_shock_threshold': 0.20,
             'corr_threshold': 0.30,
-            'vix_panic': 32,
+            'vix_panic': VIX_EXTREME_THRESHOLD,  # v2.1: 使用优化后的阈值
             'vix_recession': 35,
             'vix_elevated': 20
         }
@@ -3901,14 +5046,15 @@ def determine_macro_state(row, params=None):
     is_down = row['Trend_Bear']
     is_vol_elevated = row['VIX'] > params['vix_elevated']
     
+    # v2.1: 优化状态判断顺序，让EXTREME_ACCUMULATION更容易触发
     if is_shock or (is_rec and is_c_broken):
         return "INFLATION_SHOCK"
     elif is_rec or (is_down and row['VIX'] > params['vix_recession']):
         return "DEFLATION_RECESSION"
     elif is_f and not is_shock and not is_rec:
+        # v2.1: VIX>30即触发抄底（原32），且不要求趋势下跌
         return "EXTREME_ACCUMULATION"
     elif is_down:
-        # Optimized: If Trend is Down, prioritize Trend signal (Defensive) over Volatility signal.
         return "CAUTIOUS_TREND"
     elif is_vol_elevated:
         return "CAUTIOUS_VOL"
@@ -3997,12 +5143,30 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
     tickers = ['IWY', 'TLT', '^TNX', '^VIX', 'GLD', 'IWD', '^GSPC', 'VUSTX']
     df_all = fetch_yf_with_retry(tickers, start=fetch_start, end=fetch_end, auto_adjust=False)
     if df_all is None or df_all.empty:
-        return pd.DataFrame(), "Market data fetch failed or incomplete."
+        return pd.DataFrame(), f"Market data fetch failed. 请检查网络连接或稍后重试。(tickers: {tickers})"
 
     data = normalize_yf_prices(df_all)
     
     if data.empty:
-         return pd.DataFrame(), "Market data fetch failed or incomplete."
+        # 提供更详细的诊断信息
+        col_info = str(df_all.columns.tolist())[:200] if df_all is not None else "None"
+        return pd.DataFrame(), f"数据格式解析失败。原始列: {col_info}"
+    
+    # 诊断: 检查各列有效数据量
+    col_stats = {}
+    for c in data.columns:
+        valid_count = data[c].dropna().shape[0]
+        total_count = len(data)
+        col_stats[c] = f"{valid_count}/{total_count}"
+    
+    valid_cols = [c for c in data.columns if data[c].dropna().shape[0] > 0]
+    if not valid_cols:
+        return pd.DataFrame(), f"所有列数据为空。列统计: {col_stats}"
+    
+    # 如果 IWY 为空但 ^GSPC 有数据，记录警告
+    if 'IWY' in data.columns and data['IWY'].dropna().shape[0] == 0:
+        if '^GSPC' in data.columns and data['^GSPC'].dropna().shape[0] > 0:
+            log_event("WARN", "IWY data empty, will use ^GSPC as proxy", {"col_stats": col_stats})
 
     # 2. Fetch FRED Data (UNRATE & T10Y2Y)
     try:
@@ -4044,7 +5208,11 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
         # If use_proxies is True, we FORCE the use of Indices (^GSPC, VUSTX) to ensure we get data back to 1990s.
         # Otherwise, we prefer the actual ETFs (IWY, TLT).
         
-        prefer_etfs = ('IWY' in data.columns) and ('TLT' in data.columns) and (not use_proxies)
+        # 检查 ETF 是否有有效数据（不只是列存在，至少要有10%的数据不为空）
+        min_valid_ratio = 0.1  # 至少10%的数据有效
+        iwy_has_data = ('IWY' in data.columns) and (data['IWY'].dropna().shape[0] > len(data) * min_valid_ratio)
+        tlt_has_data = ('TLT' in data.columns) and (data['TLT'].dropna().shape[0] > len(data) * min_valid_ratio)
+        prefer_etfs = iwy_has_data and tlt_has_data and (not use_proxies)
 
         if prefer_etfs:
             corr = data['IWY'].rolling(60).corr(data['TLT'])
@@ -4088,8 +5256,9 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
             
         # Style Trend
         style_value_regime = pd.Series(False, index=data.index)
-        # Only use IWY/IWD if NOT using proxies (since IWD history is short)
-        if not use_proxies and 'IWY' in data.columns and 'IWD' in data.columns:
+        # Only use IWY/IWD if NOT using proxies and both have valid data
+        iwd_has_data = ('IWD' in data.columns) and (data['IWD'].dropna().shape[0] > len(data) * min_valid_ratio)
+        if not use_proxies and iwy_has_data and iwd_has_data:
             pair_ratio = data['IWY'] / data['IWD']
             pair_ma = pair_ratio.rolling(ma_window).mean()
             style_value_regime = pair_ratio < pair_ma 
@@ -4098,17 +5267,57 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
             style_value_regime = pd.Series(False, index=data.index)
 
         # Assemble DataFrame
+        # 获取 VIX 数据，如果缺失则用默认值15（中性水平）
+        vix_series = data.get('^VIX', None)
+        if vix_series is None or vix_series.dropna().empty:
+            vix_series = pd.Series(15.0, index=data.index)
+        else:
+            vix_series = vix_series.ffill().bfill().fillna(15.0)
+        
+        # 确保 iwy_series 有数据（前向/后向填充）
+        if iwy_series is not None and not iwy_series.dropna().empty:
+            iwy_series = iwy_series.ffill().bfill()
+        else:
+            # 最后兜底：如果 iwy_series 仍然全空，使用 ^GSPC
+            if '^GSPC' in data.columns and data['^GSPC'].dropna().shape[0] > 0:
+                iwy_series = data['^GSPC'].ffill().bfill()
+                log_event("WARN", "Using ^GSPC as IWY proxy due to empty IWY data")
+            else:
+                return pd.DataFrame(), "无法获取 IWY 或 ^GSPC 价格数据"
+        
         df_hist = pd.DataFrame({
             'IWY': iwy_series,
             'Sahm': sahm_series,
             'RateShock': tnx_roc,
             'Corr': corr,
-            'VIX': data.get('^VIX', pd.Series(0, index=data.index)),
+            'VIX': vix_series,
             'Trend_Bear': trend_bear,
             'YieldCurve': yc_daily['T10Y2Y'],
             'Gold_Bear': gold_trend_bear,
             'Value_Regime': style_value_regime
-        }).dropna()
+        })
+        
+        # 用前向填充处理缺失值，而不是直接删除（避免丢失过多数据）
+        df_hist = df_hist.ffill().bfill()
+        
+        # 只删除关键列仍为空的行
+        essential_cols = ['IWY', 'VIX', 'Trend_Bear']
+        
+        # 诊断: 检查关键列的缺失情况
+        missing_info = {}
+        for col in essential_cols:
+            if col in df_hist.columns:
+                na_count = df_hist[col].isna().sum()
+                total = len(df_hist)
+                missing_info[col] = f"{na_count}/{total}"
+            else:
+                missing_info[col] = "列不存在"
+        
+        df_hist = df_hist.dropna(subset=essential_cols)
+        
+        if df_hist.empty:
+            diag_msg = f"关键列缺失情况: {missing_info}; 可用列: {list(data.columns)}; 日期范围: {data.index.min()} ~ {data.index.max()}"
+            return pd.DataFrame(), f"数据处理后为空。{diag_msg}"
         
         # 4. Determine States
         # Pass params to the state determinator
@@ -4116,10 +5325,15 @@ def get_historical_macro_data(start_date, end_date, ma_window=200, params=None, 
         
         # Filter Output
         df_final = df_hist.loc[(df_hist.index >= pd.to_datetime(start_date)) & (df_hist.index <= pd.to_datetime(end_date))]
+        
+        if df_final.empty:
+            return pd.DataFrame(), f"所选日期范围 ({start_date} ~ {end_date}) 内无有效数据，请尝试更近的日期或启用 Use Proxies"
+        
         return df_final, None
 
     except Exception as e:
-        return pd.DataFrame(), f"Error in calculation: {str(e)}"
+        import traceback
+        return pd.DataFrame(), f"计算错误: {str(e)}\n{traceback.format_exc()}"
 
 # --- UI Components ---
 
@@ -4658,322 +5872,333 @@ def render_historical_backtest_section():
     if run and isinstance(dates, (tuple, list)) and len(dates)==2:
         with st.spinner("回测中..."):
             df_states, err = get_historical_macro_data(dates[0], dates[1], ma_window=int(ma_window), params=custom_params, use_proxies=use_proxies)
-            if not df_states.empty:
-                res, df_history, err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies, rebal_freq=rebal_freq, transaction_cost_bps=cost_bps)
-                if res is not None:
-                    # Metrics & Charts (Simplified for brevity as logic exists in run_dynamic_backtest return)
-                    st.success("回测完成")
+            if err:
+                st.error(f"获取宏观数据失败: {err}")
+                st.info("💡 提示：如果日期范围较早，请尝试勾选 '启用代理资产 (Use Proxies)' 选项")
+                return
+            if df_states.empty:
+                st.error("宏观数据为空，请检查日期范围或网络连接")
+                return
+            
+            res, df_history, bt_err = run_dynamic_backtest(df_states, dates[0], dates[1], cap, ma_window=int(ma_window), use_proxies=use_proxies, rebal_freq=rebal_freq, transaction_cost_bps=cost_bps)
+            if res is None:
+                st.error(f"回测执行失败: {bt_err}")
+                st.info("💡 提示：请尝试缩短日期范围或勾选 'Use Proxies' 选项")
+                return
+            
+            # Metrics & Charts (Simplified for brevity as logic exists in run_dynamic_backtest return)
+            st.success("回测完成")
+            
+            # 1. Curve
+            fig = go.Figure()
+            for c in res.columns:
+                fig.add_trace(go.Scatter(x=res.index, y=res[c], name=c))
+            
+            # Add Background Colors for States
+            shapes_curve = []
+            annotations_curve = []
+            
+            if df_history is not None and not df_history.empty:
+                # Create a copy to avoid affecting downstream logic
+                df_viz = df_history.copy()
+                df_viz['state_grp'] = (df_viz['State'] != df_viz['State'].shift()).cumsum()
+                
+                # Group by state segments
+                state_segments = df_viz.groupby(['state_grp', 'State'])['State'].agg(
+                    ['first', lambda x: x.index[0], lambda x: x.index[-1]]
+                ).reset_index()
+                state_segments.columns = ['grp', 'State', 'State_Name', 'Start', 'End']
+                
+                for _, seg in state_segments.iterrows():
+                    s_conf = MACRO_STATES.get(seg['State'], MACRO_STATES["NEUTRAL"])
+                    color = s_conf['bg_color']
                     
-                    # 1. Curve
-                    fig = go.Figure()
-                    for c in res.columns:
-                        fig.add_trace(go.Scatter(x=res.index, y=res[c], name=c))
+                    # Add shape
+                    shapes_curve.append(dict(
+                        type="rect",
+                        xref="x", yref="paper",
+                        x0=seg['Start'], x1=seg['End'],
+                        y0=0, y1=1,
+                        fillcolor=color,
+                        opacity=0.3,
+                        layer="below",
+                        line_width=0,
+                    ))
                     
-                    # Add Background Colors for States
-                    shapes_curve = []
-                    annotations_curve = []
-                    
-                    if df_history is not None and not df_history.empty:
-                        # Create a copy to avoid affecting downstream logic
-                        df_viz = df_history.copy()
-                        df_viz['state_grp'] = (df_viz['State'] != df_viz['State'].shift()).cumsum()
-                        
-                        # Group by state segments
-                        state_segments = df_viz.groupby(['state_grp', 'State'])['State'].agg(
-                            ['first', lambda x: x.index[0], lambda x: x.index[-1]]
-                        ).reset_index()
-                        state_segments.columns = ['grp', 'State', 'State_Name', 'Start', 'End']
-                        
-                        for _, seg in state_segments.iterrows():
-                            s_conf = MACRO_STATES.get(seg['State'], MACRO_STATES["NEUTRAL"])
-                            color = s_conf['bg_color']
-                            
-                            # Add shape
-                            shapes_curve.append(dict(
-                                type="rect",
-                                xref="x", yref="paper",
-                                x0=seg['Start'], x1=seg['End'],
-                                y0=0, y1=1,
-                                fillcolor=color,
-                                opacity=0.3,
-                                layer="below",
-                                line_width=0,
-                            ))
-                            
-                            # Add icon label if segment is long enough
-                            if (seg['End'] - seg['Start']).days > 15:
-                                annotations_curve.append(dict(
-                                    x=seg['Start'] + (seg['End'] - seg['Start'])/2,
-                                    y=1.05,
-                                    xref="x", yref="paper",
-                                    text=s_conf['icon'],
-                                    showarrow=False,
-                                    font=dict(size=14)
-                                ))
+                    # Add icon label if segment is long enough
+                    if (seg['End'] - seg['Start']).days > 15:
+                        annotations_curve.append(dict(
+                            x=seg['Start'] + (seg['End'] - seg['Start'])/2,
+                            y=1.05,
+                            xref="x", yref="paper",
+                            text=s_conf['icon'],
+                            showarrow=False,
+                            font=dict(size=14)
+                        ))
 
-                    fig.update_layout(
-                        title="净值曲线 (Net Value Curve)", 
-                        template="plotly_white",
-                        shapes=shapes_curve,
-                        annotations=annotations_curve,
-                        hovermode="x unified"
+            fig.update_layout(
+                title="净值曲线 (Net Value Curve)", 
+                template="plotly_white",
+                shapes=shapes_curve,
+                annotations=annotations_curve,
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # --- NEW: State & Allocation Visualization ---
+            st.markdown("### 🏗️ 仓位历史与状态分布 (Allocation & Regimes)")
+            
+            if df_history is not None and not df_history.empty:
+                # Stacked Area Chart
+                fig_alloc = go.Figure()
+                
+                # Identify asset columns (float types)
+                asset_cols = df_history.select_dtypes(include=[np.number]).columns
+                
+                for asset in asset_cols:
+                    fig_alloc.add_trace(go.Scatter(
+                        x=df_history.index, 
+                        y=df_history[asset],
+                        mode='lines',
+                        name=ASSET_NAMES.get(asset, asset),
+                        stackgroup='one',
+                        groupnorm='percent', # Normalize to 0-100
+                        hoverinfo='x+y+name'
+                    ))
+                
+                # Add Background Colors for States
+                # 1. Simplify states to segments
+                df_history['state_grp'] = (df_history['State'] != df_history['State'].shift()).cumsum()
+                state_segments = df_history.groupby(['state_grp', 'State'])['State'].agg(['first', lambda x: x.index[0], lambda x: x.index[-1]]).reset_index()
+                state_segments.columns = ['grp', 'State', 'State_Name', 'Start', 'End']
+                
+                shapes = []
+                annotations = []
+                
+                for _, seg in state_segments.iterrows():
+                    s_conf = MACRO_STATES.get(seg['State'], MACRO_STATES["NEUTRAL"])
+                    color = s_conf['bg_color']
+                    
+                    # Add shape
+                    shapes.append(dict(
+                        type="rect",
+                        xref="x", yref="paper",
+                        x0=seg['Start'], x1=seg['End'],
+                        y0=0, y1=1,
+                        fillcolor=color,
+                        opacity=0.3,
+                        layer="below",
+                        line_width=0,
+                    ))
+                    
+                    # Add label if segment is long enough (e.g. > 10 days)
+                    if (seg['End'] - seg['Start']).days > 15:
+                        annotations.append(dict(
+                            x=seg['Start'] + (seg['End'] - seg['Start'])/2,
+                            y=1.05,
+                            xref="x", yref="paper",
+                            text=s_conf['icon'],
+                            showarrow=False,
+                            font=dict(size=14)
+                        ))
+
+                fig_alloc.update_layout(
+                    title="历史持仓分布与市场状态 (Portfolio Allocation & Market Regimes)",
+                    template="plotly_white",
+                    yaxis=dict(title="Allocation %", range=[0, 100]),
+                    shapes=shapes,
+                    annotations=annotations,
+                    hovermode="x unified"
+                )
+                st.plotly_chart(fig_alloc, use_container_width=True)
+                
+                # Legend for states (Optional text below)
+                st.caption("背景颜色代表市场状态: " + " | ".join([f"{v['icon']} {k}" for k, v in MACRO_STATES.items()]))
+
+            # 2. Drawdown
+            fig_dd = go.Figure()
+            for c in res.columns:
+                dd = (res[c]/res[c].cummax()-1)*100
+                fig_dd.add_trace(go.Scatter(x=dd.index, y=dd, name=c, fill='tozeroy' if 'Dynamic' in c else None))
+            fig_dd.update_layout(title="最大回撤", template="plotly_white")
+            st.plotly_chart(fig_dd, use_container_width=True)
+            
+            # 3. Metrics Table
+            metrics_list = []
+            for col in res.columns:
+                m = calculate_equity_curve_metrics(res[col])
+                row = {"Strategy": col}
+                row.update(m)
+                metrics_list.append(row)
+            
+            st.markdown("#### 📊 详细性能指标 (Performance Metrics)")
+            df_metrics = pd.DataFrame(metrics_list)
+            
+            # Basic Configs
+            col_config = {
+                "Strategy": st.column_config.TextColumn("策略名称", width="medium"),
+                "Total Return (%)": st.column_config.NumberColumn("总收益率", format="%.2f%%"),
+                "CAGR (%)": st.column_config.NumberColumn("年化收益 (CAGR)", format="%.2f%%"),
+                "Max Drawdown (%)": st.column_config.NumberColumn("最大回撤", format="%.2f%%"),
+                "Max DD Days": st.column_config.NumberColumn("回撤修复 (天)", format="%d"),
+                "Volatility (%)": st.column_config.NumberColumn("波动率", format="%.2f%%"),
+                "Sharpe Ratio": st.column_config.NumberColumn("夏普比率", format="%.2f"),
+                "Sortino Ratio": st.column_config.NumberColumn("索提诺", format="%.2f"),
+                "Calmar Ratio": st.column_config.NumberColumn("卡玛", format="%.2f"),
+                "Win Rate (Daily %)": st.column_config.NumberColumn("胜率", format="%.1f%%"),
+                "Profit/Loss Ratio": st.column_config.NumberColumn("盈亏比", format="%.2f"),
+            }
+            
+            # Add dynamic configs for Years
+            for c in df_metrics.columns:
+                if " (%)" in c and c not in col_config:
+                    col_config[c] = st.column_config.NumberColumn(c, format="%.2f%%")
+                    
+            st.dataframe(
+                df_metrics, 
+                use_container_width=True,
+                column_config=col_config,
+                hide_index=True
+            )
+            
+            # --- 4. Trading Costs & Frequency Analysis ---
+            if df_history is not None and 'Turnover' in df_history.columns:
+                st.markdown("---")
+                st.markdown("#### 💸 交易成本与频率 (Trading Costs & Frequency)")
+                
+                # Calculate Stats
+                total_days = len(df_history)
+                years = total_days / 252.0 if total_days > 0 else 0
+                
+                # Total One-sided Turnover (sum of daily portions)
+                # We skip the first day (initial allocation) for "churn" metrics, 
+                # but keeping it shows total volume. Usually exclude day 1 for "Strategy Turnover".
+                
+                if total_days > 1:
+                    turnover_series = df_history['Turnover'].iloc[1:] # Exclude initial setup
+                    total_turnover = turnover_series.sum()
+                    avg_daily_turnover = turnover_series.mean()
+                    annual_turnover = avg_daily_turnover * 252
+                    
+                    # Est Cost (use user-defined cost_bps)
+                    total_cost_est = total_turnover * (cost_bps / 10000)
+                    annual_cost_est = annual_turnover * (cost_bps / 10000)
+                    
+                    # Avg Holding Period (Days)
+                    avg_hold_days = safe_div(1, avg_daily_turnover, 0)
+                else:
+                    annual_turnover = 0
+                    annual_cost_est = 0
+                    avg_hold_days = 0
+
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.metric("年化换手率 (Annual Turnover)", f"{annual_turnover:.1%}", help="平均每年调整仓位的总比例 (单边)")
+                with c2:
+                    st.metric("平均持仓周期 (Avg Hold)", f"{avg_hold_days:.1f} 天", help="平均每笔资金持有的天数")
+                with c3:
+                    st.metric("预估年化成本 (Est. Cost)", f"{annual_cost_est:.2%}", help=f"基于单边 {cost_bps}bps ({cost_bps/100}%) 手续费估算的年化拖累")
+                with c4:
+                    # Trading Frequency (Days with > 1% turnover)
+                    active_days = df_history[df_history['Turnover'] > 0.01].count()['Turnover']
+                    freq_pct = safe_div(active_days, total_days, 0)
+                    st.metric("活跃交易频率", f"{freq_pct:.1%}", help="日换手率超过 1% 的天数比例")
+
+                # Cost Sensitivity Analysis
+                st.markdown("**交易成本敏感性分析 (Cost Sensitivity)**")
+                cost_levels = [5, 10, 15, 20, 30]
+                cost_impact = []
+                for c_bps in cost_levels:
+                    annual_drag = annual_turnover * (c_bps / 10000) * 100  # Convert to %
+                    cost_impact.append({'成本(bps)': c_bps, '年化拖累%': annual_drag})
+                df_cost = pd.DataFrame(cost_impact)
+                
+                c_sens1, c_sens2 = st.columns([1, 2])
+                with c_sens1:
+                    st.dataframe(df_cost.style.format({'年化拖累%': '{:.2f}%'}), use_container_width=True, hide_index=True)
+                with c_sens2:
+                    fig_cost = go.Figure()
+                    fig_cost.add_trace(go.Bar(x=df_cost['成本(bps)'].astype(str) + ' bps', y=df_cost['年化拖累%'], marker_color='#ff7043'))
+                    fig_cost.update_layout(title="不同成本水平下的年化拖累", yaxis_title="年化拖累%", template="plotly_white", height=250)
+                    st.plotly_chart(fig_cost, use_container_width=True)
+
+                # Chart: Rolling Turnover
+                # st.bar_chart(df_history['Turnover']) # Simple bar
+                
+                fig_to = go.Figure()
+                fig_to.add_trace(go.Bar(x=df_history.index, y=df_history['Turnover'], name='Daily Turnover'))
+                fig_to.update_layout(
+                    title="每日换手率 (Daily Turnover)", 
+                    yaxis=dict(title="Turnover %", tickformat=".1%"),
+                    template="plotly_white",
+                    height=300
+                )
+                st.plotly_chart(fig_to, use_container_width=True)
+            
+            # --- 4.5 v1.5 优化机制效果分析 ---
+            if df_history is not None and not df_history.empty:
+                st.markdown("---")
+                st.markdown("#### ⚙️ v1.5 优化机制效果 (Optimization Impact)")
+                st.caption("展示各优化模块在回测期间的触发情况与效果")
+                
+                # 止损触发统计
+                if 'InStopLoss' in df_history.columns:
+                    stop_loss_days = df_history['InStopLoss'].sum()
+                    stop_loss_pct = stop_loss_days / len(df_history) * 100
+                    
+                    # 计算止损保护效果 (止损期间的平均回撤恢复)
+                    if 'Drawdown' in df_history.columns:
+                        sl_drawdowns = df_history[df_history['InStopLoss']]['Drawdown']
+                        avg_sl_drawdown = sl_drawdowns.mean() * 100 if len(sl_drawdowns) > 0 else 0
+                else:
+                    stop_loss_days = 0
+                    stop_loss_pct = 0
+                    avg_sl_drawdown = 0
+                
+                # 状态过渡统计
+                if 'InTransition' in df_history.columns:
+                    transition_days = df_history['InTransition'].sum()
+                else:
+                    transition_days = 0
+                
+                # 实际再平衡统计
+                if 'Rebalanced' in df_history.columns:
+                    rebal_days = df_history['Rebalanced'].sum()
+                    rebal_pct = rebal_days / len(df_history) * 100
+                else:
+                    rebal_days = 0
+                    rebal_pct = 0
+                
+                # 显示统计卡片
+                col_opt1, col_opt2, col_opt3, col_opt4 = st.columns(4)
+                with col_opt1:
+                    st.metric(
+                        "🛡️ 止损保护天数", 
+                        f"{stop_loss_days} 天 ({stop_loss_pct:.1f}%)",
+                        help=f"触发止损机制的天数（回撤>{abs(DRAWDOWN_STOP_LOSS)*100:.0f}%）"
                     )
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # --- NEW: State & Allocation Visualization ---
-                    st.markdown("### 🏗️ 仓位历史与状态分布 (Allocation & Regimes)")
-                    
-                    if df_history is not None and not df_history.empty:
-                        # Stacked Area Chart
-                        fig_alloc = go.Figure()
-                        
-                        # Identify asset columns (float types)
-                        asset_cols = df_history.select_dtypes(include=[np.number]).columns
-                        
-                        for asset in asset_cols:
-                            fig_alloc.add_trace(go.Scatter(
-                                x=df_history.index, 
-                                y=df_history[asset],
-                                mode='lines',
-                                name=ASSET_NAMES.get(asset, asset),
-                                stackgroup='one',
-                                groupnorm='percent', # Normalize to 0-100
-                                hoverinfo='x+y+name'
-                            ))
-                        
-                        # Add Background Colors for States
-                        # 1. Simplify states to segments
-                        df_history['state_grp'] = (df_history['State'] != df_history['State'].shift()).cumsum()
-                        state_segments = df_history.groupby(['state_grp', 'State'])['State'].agg(['first', lambda x: x.index[0], lambda x: x.index[-1]]).reset_index()
-                        state_segments.columns = ['grp', 'State', 'State_Name', 'Start', 'End']
-                        
-                        shapes = []
-                        annotations = []
-                        
-                        for _, seg in state_segments.iterrows():
-                            s_conf = MACRO_STATES.get(seg['State'], MACRO_STATES["NEUTRAL"])
-                            color = s_conf['bg_color']
-                            
-                            # Add shape
-                            shapes.append(dict(
-                                type="rect",
-                                xref="x", yref="paper",
-                                x0=seg['Start'], x1=seg['End'],
-                                y0=0, y1=1,
-                                fillcolor=color,
-                                opacity=0.3,
-                                layer="below",
-                                line_width=0,
-                            ))
-                            
-                            # Add label if segment is long enough (e.g. > 10 days)
-                            if (seg['End'] - seg['Start']).days > 15:
-                                annotations.append(dict(
-                                    x=seg['Start'] + (seg['End'] - seg['Start'])/2,
-                                    y=1.05,
-                                    xref="x", yref="paper",
-                                    text=s_conf['icon'],
-                                    showarrow=False,
-                                    font=dict(size=14)
-                                ))
-
-                        fig_alloc.update_layout(
-                            title="历史持仓分布与市场状态 (Portfolio Allocation & Market Regimes)",
-                            template="plotly_white",
-                            yaxis=dict(title="Allocation %", range=[0, 100]),
-                            shapes=shapes,
-                            annotations=annotations,
-                            hovermode="x unified"
-                        )
-                        st.plotly_chart(fig_alloc, use_container_width=True)
-                        
-                        # Legend for states (Optional text below)
-                        st.caption("背景颜色代表市场状态: " + " | ".join([f"{v['icon']} {k}" for k, v in MACRO_STATES.items()]))
-
-                    # 2. Drawdown
-                    fig_dd = go.Figure()
-                    for c in res.columns:
-                        dd = (res[c]/res[c].cummax()-1)*100
-                        fig_dd.add_trace(go.Scatter(x=dd.index, y=dd, name=c, fill='tozeroy' if 'Dynamic' in c else None))
-                    fig_dd.update_layout(title="最大回撤", template="plotly_white")
-                    st.plotly_chart(fig_dd, use_container_width=True)
-                    
-                    # 3. Metrics Table
-                    metrics_list = []
-                    for col in res.columns:
-                        m = calculate_equity_curve_metrics(res[col])
-                        row = {"Strategy": col}
-                        row.update(m)
-                        metrics_list.append(row)
-                    
-                    st.markdown("#### 📊 详细性能指标 (Performance Metrics)")
-                    df_metrics = pd.DataFrame(metrics_list)
-                    
-                    # Basic Configs
-                    col_config = {
-                        "Strategy": st.column_config.TextColumn("策略名称", width="medium"),
-                        "Total Return (%)": st.column_config.NumberColumn("总收益率", format="%.2f%%"),
-                        "CAGR (%)": st.column_config.NumberColumn("年化收益 (CAGR)", format="%.2f%%"),
-                        "Max Drawdown (%)": st.column_config.NumberColumn("最大回撤", format="%.2f%%"),
-                        "Max DD Days": st.column_config.NumberColumn("回撤修复 (天)", format="%d"),
-                        "Volatility (%)": st.column_config.NumberColumn("波动率", format="%.2f%%"),
-                        "Sharpe Ratio": st.column_config.NumberColumn("夏普比率", format="%.2f"),
-                        "Sortino Ratio": st.column_config.NumberColumn("索提诺", format="%.2f"),
-                        "Calmar Ratio": st.column_config.NumberColumn("卡玛", format="%.2f"),
-                        "Win Rate (Daily %)": st.column_config.NumberColumn("胜率", format="%.1f%%"),
-                        "Profit/Loss Ratio": st.column_config.NumberColumn("盈亏比", format="%.2f"),
-                    }
-                    
-                    # Add dynamic configs for Years
-                    for c in df_metrics.columns:
-                        if " (%)" in c and c not in col_config:
-                            col_config[c] = st.column_config.NumberColumn(c, format="%.2f%%")
-                            
-                    st.dataframe(
-                        df_metrics, 
-                        use_container_width=True,
-                        column_config=col_config,
-                        hide_index=True
+                with col_opt2:
+                    st.metric(
+                        "📉 止损期平均回撤",
+                        f"{avg_sl_drawdown:.2f}%" if stop_loss_days > 0 else "N/A",
+                        help="止损保护期间的平均回撤水平"
                     )
-                    
-                    # --- 4. Trading Costs & Frequency Analysis ---
-                    if df_history is not None and 'Turnover' in df_history.columns:
-                        st.markdown("---")
-                        st.markdown("#### 💸 交易成本与频率 (Trading Costs & Frequency)")
-                        
-                        # Calculate Stats
-                        total_days = len(df_history)
-                        years = total_days / 252.0 if total_days > 0 else 0
-                        
-                        # Total One-sided Turnover (sum of daily portions)
-                        # We skip the first day (initial allocation) for "churn" metrics, 
-                        # but keeping it shows total volume. Usually exclude day 1 for "Strategy Turnover".
-                        
-                        if total_days > 1:
-                            turnover_series = df_history['Turnover'].iloc[1:] # Exclude initial setup
-                            total_turnover = turnover_series.sum()
-                            avg_daily_turnover = turnover_series.mean()
-                            annual_turnover = avg_daily_turnover * 252
-                            
-                            # Est Cost (use user-defined cost_bps)
-                            total_cost_est = total_turnover * (cost_bps / 10000)
-                            annual_cost_est = annual_turnover * (cost_bps / 10000)
-                            
-                            # Avg Holding Period (Days)
-                            avg_hold_days = safe_div(1, avg_daily_turnover, 0)
-                        else:
-                            annual_turnover = 0
-                            annual_cost_est = 0
-                            avg_hold_days = 0
-
-                        c1, c2, c3, c4 = st.columns(4)
-                        with c1:
-                            st.metric("年化换手率 (Annual Turnover)", f"{annual_turnover:.1%}", help="平均每年调整仓位的总比例 (单边)")
-                        with c2:
-                            st.metric("平均持仓周期 (Avg Hold)", f"{avg_hold_days:.1f} 天", help="平均每笔资金持有的天数")
-                        with c3:
-                            st.metric("预估年化成本 (Est. Cost)", f"{annual_cost_est:.2%}", help=f"基于单边 {cost_bps}bps ({cost_bps/100}%) 手续费估算的年化拖累")
-                        with c4:
-                            # Trading Frequency (Days with > 1% turnover)
-                            active_days = df_history[df_history['Turnover'] > 0.01].count()['Turnover']
-                            freq_pct = safe_div(active_days, total_days, 0)
-                            st.metric("活跃交易频率", f"{freq_pct:.1%}", help="日换手率超过 1% 的天数比例")
-
-                        # Cost Sensitivity Analysis
-                        st.markdown("**交易成本敏感性分析 (Cost Sensitivity)**")
-                        cost_levels = [5, 10, 15, 20, 30]
-                        cost_impact = []
-                        for c_bps in cost_levels:
-                            annual_drag = annual_turnover * (c_bps / 10000) * 100  # Convert to %
-                            cost_impact.append({'成本(bps)': c_bps, '年化拖累%': annual_drag})
-                        df_cost = pd.DataFrame(cost_impact)
-                        
-                        c_sens1, c_sens2 = st.columns([1, 2])
-                        with c_sens1:
-                            st.dataframe(df_cost.style.format({'年化拖累%': '{:.2f}%'}), use_container_width=True, hide_index=True)
-                        with c_sens2:
-                            fig_cost = go.Figure()
-                            fig_cost.add_trace(go.Bar(x=df_cost['成本(bps)'].astype(str) + ' bps', y=df_cost['年化拖累%'], marker_color='#ff7043'))
-                            fig_cost.update_layout(title="不同成本水平下的年化拖累", yaxis_title="年化拖累%", template="plotly_white", height=250)
-                            st.plotly_chart(fig_cost, use_container_width=True)
-
-                        # Chart: Rolling Turnover
-                        # st.bar_chart(df_history['Turnover']) # Simple bar
-                        
-                        fig_to = go.Figure()
-                        fig_to.add_trace(go.Bar(x=df_history.index, y=df_history['Turnover'], name='Daily Turnover'))
-                        fig_to.update_layout(
-                            title="每日换手率 (Daily Turnover)", 
-                            yaxis=dict(title="Turnover %", tickformat=".1%"),
-                            template="plotly_white",
-                            height=300
-                        )
-                        st.plotly_chart(fig_to, use_container_width=True)
-                    
-                    # --- 4.5 v1.5 优化机制效果分析 ---
-                    if df_history is not None and not df_history.empty:
-                        st.markdown("---")
-                        st.markdown("#### ⚙️ v1.5 优化机制效果 (Optimization Impact)")
-                        st.caption("展示各优化模块在回测期间的触发情况与效果")
-                        
-                        # 止损触发统计
-                        if 'InStopLoss' in df_history.columns:
-                            stop_loss_days = df_history['InStopLoss'].sum()
-                            stop_loss_pct = stop_loss_days / len(df_history) * 100
-                            
-                            # 计算止损保护效果 (止损期间的平均回撤恢复)
-                            if 'Drawdown' in df_history.columns:
-                                sl_drawdowns = df_history[df_history['InStopLoss']]['Drawdown']
-                                avg_sl_drawdown = sl_drawdowns.mean() * 100 if len(sl_drawdowns) > 0 else 0
-                        else:
-                            stop_loss_days = 0
-                            stop_loss_pct = 0
-                            avg_sl_drawdown = 0
-                        
-                        # 状态过渡统计
-                        if 'InTransition' in df_history.columns:
-                            transition_days = df_history['InTransition'].sum()
-                        else:
-                            transition_days = 0
-                        
-                        # 实际再平衡统计
-                        if 'Rebalanced' in df_history.columns:
-                            rebal_days = df_history['Rebalanced'].sum()
-                            rebal_pct = rebal_days / len(df_history) * 100
-                        else:
-                            rebal_days = 0
-                            rebal_pct = 0
-                        
-                        # 显示统计卡片
-                        col_opt1, col_opt2, col_opt3, col_opt4 = st.columns(4)
-                        with col_opt1:
-                            st.metric(
-                                "🛡️ 止损保护天数", 
-                                f"{stop_loss_days} 天 ({stop_loss_pct:.1f}%)",
-                                help=f"触发止损机制的天数（回撤>{abs(DRAWDOWN_STOP_LOSS)*100:.0f}%）"
-                            )
-                        with col_opt2:
-                            st.metric(
-                                "📉 止损期平均回撤",
-                                f"{avg_sl_drawdown:.2f}%" if stop_loss_days > 0 else "N/A",
-                                help="止损保护期间的平均回撤水平"
-                            )
-                        with col_opt3:
-                            st.metric(
-                                "🔀 状态过渡天数",
-                                f"{transition_days} 天",
-                                help=f"状态切换时的平滑过渡期（{STATE_TRANSITION_DAYS}天渐进）"
-                            )
-                        with col_opt4:
-                            st.metric(
-                                "📊 实际再平衡",
-                                f"{rebal_days} 次 ({rebal_pct:.1f}%)",
-                                help=f"超过容忍带{REBALANCE_THRESHOLD*100:.0f}%才再平衡"
-                            )
-                        
-                        # 详细优化机制说明
-                        with st.expander("📖 v1.5 优化机制详解", expanded=False):
-                            st.markdown(f"""
+                with col_opt3:
+                    st.metric(
+                        "🔀 状态过渡天数",
+                        f"{transition_days} 天",
+                        help=f"状态切换时的平滑过渡期（{STATE_TRANSITION_DAYS}天渐进）"
+                    )
+                with col_opt4:
+                    st.metric(
+                        "📊 实际再平衡",
+                        f"{rebal_days} 次 ({rebal_pct:.1f}%)",
+                        help=f"超过容忍带{REBALANCE_THRESHOLD*100:.0f}%才再平衡"
+                    )
+                
+                # 详细优化机制说明
+                with st.expander("📖 v1.5 优化机制详解", expanded=False):
+                    st.markdown(f"""
 **当前启用的优化机制：**
 
 | 机制 | 参数 | 说明 |
@@ -4988,38 +6213,38 @@ def render_historical_backtest_section():
 | 🔗 相关性渐进 | {CORR_MID_THRESHOLD}-{CORR_HIGH_THRESHOLD}区间 | 股债相关性升高时渐进转移 |
 | 📊 市场广度 | <{MARKET_BREADTH_LOW*100:.0f}%时保守 | 跨资产动量共振检测 |
 """)
-                        
-                        # 止损触发时间线
-                        if 'InStopLoss' in df_history.columns and stop_loss_days > 0:
-                            st.markdown("**🛡️ 止损保护时间线**")
-                            
-                            # 找出止损区间
-                            df_sl = df_history.copy()
-                            df_sl['sl_change'] = df_sl['InStopLoss'].astype(int).diff().fillna(0)
-                            
-                            sl_starts = df_sl[df_sl['sl_change'] == 1].index.tolist()
-                            sl_ends = df_sl[df_sl['sl_change'] == -1].index.tolist()
-                            
-                            # 匹配止损区间
-                            sl_periods = []
-                            for i, start in enumerate(sl_starts):
-                                # 找到对应的结束点
-                                end = None
-                                for e in sl_ends:
-                                    if e > start:
-                                        end = e
-                                        break
-                                if end is None:
-                                    end = df_history.index[-1]
-                                duration = (end - start).days
-                                sl_periods.append({
-                                    '开始': start.strftime('%Y-%m-%d'),
-                                    '结束': end.strftime('%Y-%m-%d'),
-                                    '持续(天)': duration
-                                })
-                            
-                            if sl_periods:
-                                st.dataframe(pd.DataFrame(sl_periods), hide_index=True, use_container_width=True)
+                
+                # 止损触发时间线
+                if 'InStopLoss' in df_history.columns and stop_loss_days > 0:
+                    st.markdown("**🛡️ 止损保护时间线**")
+                    
+                    # 找出止损区间
+                    df_sl = df_history.copy()
+                    df_sl['sl_change'] = df_sl['InStopLoss'].astype(int).diff().fillna(0)
+                    
+                    sl_starts = df_sl[df_sl['sl_change'] == 1].index.tolist()
+                    sl_ends = df_sl[df_sl['sl_change'] == -1].index.tolist()
+                    
+                    # 匹配止损区间
+                    sl_periods = []
+                    for i, start in enumerate(sl_starts):
+                        # 找到对应的结束点
+                        end = None
+                        for e in sl_ends:
+                            if e > start:
+                                end = e
+                                break
+                        if end is None:
+                            end = df_history.index[-1]
+                        duration = (end - start).days
+                        sl_periods.append({
+                            '开始': start.strftime('%Y-%m-%d'),
+                            '结束': end.strftime('%Y-%m-%d'),
+                            '持续(天)': duration
+                        })
+                    
+                    if sl_periods:
+                        st.dataframe(pd.DataFrame(sl_periods), hide_index=True, use_container_width=True)
                     
                     # --- 5. State Transition Analysis ---
                     st.markdown("---")
@@ -5649,11 +6874,100 @@ def render_portfolio_backtest():
                             st.error("Name required.")
 
             with col_act_3:
-                run_backtest = st.button("🚀 Run Backtest", type="primary", use_container_width=True)
+                col_bt, col_opt = st.columns(2)
+                with col_bt:
+                    run_backtest = st.button("🚀 回测", type="primary", use_container_width=True)
+                with col_opt:
+                    run_optimize = st.button("⚡ 优化", type="secondary", use_container_width=True)
         else:
             run_backtest = False
+            run_optimize = False
 
     st.markdown("---")
+    
+    # === 组合优化器 ===
+    if 'run_optimize' in dir() and run_optimize and tickers:
+        st.header("⚡ 组合优化器 (Portfolio Optimizer)")
+        st.caption("基于历史数据找到最优资产配置比例，平衡收益、波动和回撤")
+        
+        with st.spinner("正在优化组合配置..."):
+            try:
+                # 获取数据
+                opt_data_raw = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
+                
+                if opt_data_raw is None or opt_data_raw.empty:
+                    st.error("无法获取数据，请检查网络或ticker")
+                else:
+                    opt_prices = normalize_yf_prices(opt_data_raw)
+                    
+                    if isinstance(opt_prices, pd.Series):
+                        opt_prices = opt_prices.to_frame(name=tickers[0])
+                    
+                    opt_prices = opt_prices.dropna(axis=1, how='all').ffill().bfill()
+                    
+                    valid_tickers = [t for t in tickers if t in opt_prices.columns]
+                    
+                    if len(valid_tickers) < 2:
+                        st.error("需要至少2个有效资产进行优化")
+                    else:
+                        # 优化参数
+                        with st.expander("⚙️ 优化参数", expanded=False):
+                            opt_col1, opt_col2, opt_col3 = st.columns(3)
+                            with opt_col1:
+                                opt_rf = st.number_input("无风险利率 (%)", value=4.0, min_value=0.0, max_value=10.0, step=0.5) / 100
+                            with opt_col2:
+                                opt_min_w = st.number_input("单资产最小权重 (%)", value=0.0, min_value=0.0, max_value=50.0, step=5.0) / 100
+                            with opt_col3:
+                                opt_max_w = st.number_input("单资产最大权重 (%)", value=50.0, min_value=10.0, max_value=100.0, step=10.0) / 100
+                        
+                        # 运行优化
+                        opt_results = run_portfolio_optimization(
+                            opt_prices, valid_tickers, 
+                            risk_free_rate=opt_rf,
+                            min_weight=opt_min_w,
+                            max_weight=opt_max_w
+                        )
+                        
+                        # 渲染结果
+                        render_optimization_results(opt_results, opt_prices, valid_tickers)
+                        
+                        # 应用最优配置按钮
+                        st.markdown("---")
+                        st.markdown("### 📥 应用优化结果")
+                        
+                        apply_col1, apply_col2, apply_col3 = st.columns(3)
+                        
+                        with apply_col1:
+                            if st.button("应用最大夏普配置", use_container_width=True):
+                                if "max_sharpe" in opt_results:
+                                    new_weights = opt_results["max_sharpe"]["weights"]
+                                    for t, w in new_weights.items():
+                                        st.session_state[f"w_{t}"] = w * 100
+                                    st.toast("已应用最大夏普配置", icon="✅")
+                                    st.rerun()
+                        
+                        with apply_col2:
+                            if st.button("应用最小波动配置", use_container_width=True):
+                                if "min_volatility" in opt_results:
+                                    new_weights = opt_results["min_volatility"]["weights"]
+                                    for t, w in new_weights.items():
+                                        st.session_state[f"w_{t}"] = w * 100
+                                    st.toast("已应用最小波动配置", icon="✅")
+                                    st.rerun()
+                        
+                        with apply_col3:
+                            if st.button("应用风险平价配置", use_container_width=True):
+                                if "risk_parity" in opt_results:
+                                    new_weights = opt_results["risk_parity"]["weights"]
+                                    for t, w in new_weights.items():
+                                        st.session_state[f"w_{t}"] = w * 100
+                                    st.toast("已应用风险平价配置", icon="✅")
+                                    st.rerun()
+                        
+            except Exception as e:
+                st.error(f"优化过程出错: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
     # 2. Backtest Analysis Area
     if run_backtest and tickers:
@@ -5685,10 +6999,17 @@ def render_portfolio_backtest():
 
                 # 2. Fetch Data
                 # Added auto_adjust=False to maintain consistent behavior
-                data_raw = yf.download(download_tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)['Adj Close']
+                data_raw_full = yf.download(download_tickers, start=start_date, end=end_date, progress=False, auto_adjust=False)
                 
-                if data_raw.empty:
+                if data_raw_full is None or data_raw_full.empty:
                     st.error("No data found. Check tickers or internet connection.")
+                    return
+                
+                # 使用 normalize_yf_prices 处理不同版本 yfinance 的格式
+                data_raw = normalize_yf_prices(data_raw_full)
+                
+                if data_raw is None or (hasattr(data_raw, 'empty') and data_raw.empty):
+                    st.error(f"无法解析价格数据。原始列: {data_raw_full.columns.tolist()[:5]}")
                     return
                 
                 if isinstance(data_raw, pd.Series):
