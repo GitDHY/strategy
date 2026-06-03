@@ -67,6 +67,40 @@
         "OTHERS": 0.0
       },
       "state": "NEUTRAL"
+    },
+    {
+      "date": "2026-02-09",
+      "ts": "2026-02-09T18:03:33",
+      "total_value": 10000.0,
+      "holdings": {
+        "IWY": 6000.0,
+        "WTMF": 700.0000000000001,
+        "LVHI": 1500.0,
+        "G3B.SI": 500.0,
+        "MBH.SI": 500.0,
+        "GSD.SI": 500.0,
+        "SRT.SI": 300.0,
+        "AJBU.SI": 0.0,
+        "OTHERS": 0.0
+      },
+      "state": "CAUTIOUS_VOL"
+    },
+    {
+      "date": "2026-02-11",
+      "ts": "2026-02-11T15:22:49",
+      "total_value": 10000.0,
+      "holdings": {
+        "IWY": 6000.0,
+        "WTMF": 700.0000000000001,
+        "LVHI": 1500.0,
+        "G3B.SI": 500.0,
+        "MBH.SI": 500.0,
+        "GSD.SI": 500.0,
+        "SRT.SI": 300.0,
+        "AJBU.SI": 0.0,
+        "OTHERS": 0.0
+      },
+      "state": "NEUTRAL"
     }
   ],
   "peak_value": 10000.0,
